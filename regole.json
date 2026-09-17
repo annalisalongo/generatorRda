@@ -1,0 +1,22 @@
+{
+  "data_nuova_procedura": "15/04/2026",
+  "soglia_allegato_3A": 20000,
+  "nuova_procedura": {
+    "sempre": [
+      "Allegato 6",
+      "Allegato 4",
+      "Allegato 7"
+    ],
+    "offerta": "solo se in deroga",
+    "allegato_3A": "se totale > 20.000 €"
+  },
+  "vecchia_procedura": {
+    "sempre": [
+      "Allegato 6",
+      "Allegato 1",
+      "Allegato 5",
+      "Offerta"
+    ],
+    "allegato_3A": "se totale > 20.000 €"
+  }
+}
