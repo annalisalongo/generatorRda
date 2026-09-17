@@ -1,228 +1,147 @@
 import streamlit as st
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from io import BytesIO
+import zipfile, shutil, tempfile
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from pypdf import PdfReader, PdfWriter
 
-st.set_page_config(page_title="Generatore RDA Olivetti", page_icon="📄", layout="wide")
+ROOT=Path(__file__).parent
+T=ROOT/'templates'
+CUT=date(2026,4,15); TH=Decimal('20000')
+CASI=[
+'1. Particolarità tecnologiche/infrastrutturali','2. Acquisti in condizioni di emergenza','3. Consulenze/prestazioni professionali di particolare specializzazione','4. Acquisti d’opportunità','5. Gara andata deserta','6. Prezzi imposti / impossibilità oggettiva di competizione','7. Estensione condizioni/prezzi di competizione','8. Progetti business/tecnologici con fabbisogni puntuali','9. Commercializzazione non standard per clienti privati','10. Opportunità business verso PA']
 
-SOGLIA_NUOVA_PROCEDURA = date(2026, 4, 15)
-SOGLIA_3A = Decimal("20000.00")
+def money(s):
+    s=(s or '').replace('€','').replace(' ','')
+    if ',' in s:s=s.replace('.','').replace(',','.')
+    try:return Decimal(s)
+    except:return Decimal('0')
 
-CASISTICHE_TD = [
-    "1. Particolarità tecnologiche/infrastrutturali",
-    "2. Acquisti in condizioni di emergenza adeguatamente motivati",
-    "3. Consulenze/prestazioni professionali di particolare specializzazione, integrazione o complementarità",
-    "4. Acquisti d'opportunità a condizioni estremamente vantaggiose e non ripetibili",
-    "5. Gara andata deserta",
-    "6. Prezzi imposti da autorità di settore o accordi che impediscono la competizione",
-    "7. Estensione di condizioni/prezzi definiti in competizione",
-    "8. Progetti business/tecnologici con fabbisogni puntuali e fornitori identificati",
-    "9. Commercializzazione di prodotti/soluzioni non standard per clienti privati",
-    "10. Opportunità di business per commercializzazione verso la PA",
-]
+def fmt(v):
+    return f"{v:,.2f}".replace(',','X').replace('.',',').replace('X','.')
 
-def euro_to_decimal(value: str) -> Decimal:
-    s = (value or "").strip().replace("€", "").replace(" ", "")
-    if not s:
-        return Decimal("0")
-    # Accetta 23.200,50 oppure 23200.50
-    if "," in s:
-        s = s.replace(".", "").replace(",", ".")
-    try:
-        return Decimal(s)
-    except InvalidOperation:
-        return Decimal("0")
+def overlay_pdf(src, pages_draw):
+    r=PdfReader(str(src)); w=PdfWriter()
+    for i,p in enumerate(r.pages):
+        if i in pages_draw:
+            mb=p.mediabox; width=float(mb.width); height=float(mb.height)
+            b=BytesIO(); c=canvas.Canvas(b,pagesize=(width,height))
+            pages_draw[i](c,width,height); c.save(); b.seek(0)
+            op=PdfReader(b).pages[0]; p.merge_page(op)
+        w.add_page(p)
+    out=BytesIO(); w.write(out); return out.getvalue()
 
-def calcola_documenti(data_rda: date, totale: Decimal, deroga: bool):
-    nuova = data_rda >= SOGLIA_NUOVA_PROCEDURA
-    docs = []
-    if nuova:
-        docs += [
-            ("Allegato 6 - Trattamento dati", True, "Sempre previsto"),
-            ("Allegato 4 - Requisiti sicurezza", False, "Sempre previsto"),
-            ("Allegato 7 - Razionali RDA", True, "Sempre previsto"),
-        ]
-        if deroga:
-            docs.append(("Offerta", False, "Prevista in deroga"))
-        if totale > SOGLIA_3A:
-            docs.append(("Allegato 3A - Trattativa Diretta", True, "Vademecum: totale > 20.000 €"))
-    else:
-        docs += [
-            ("Allegato 6 - Trattamento dati", True, "Sempre previsto"),
-            ("Allegato 1 - Requisiti sicurezza (vecchia procedura)", False, "Sempre previsto"),
-            ("Allegato 5 - Scheda motivazionale", True, "Sempre previsto"),
-            ("Offerta", False, "Sempre prevista"),
-        ]
-        if totale > SOGLIA_3A:
-            docs.append(("Allegato 3A - Trattativa Diretta", True, "Vademecum: totale > 20.000 €"))
-    return nuova, docs
+def text(c,x,y,s,size=8,maxw=85):
+    c.setFont('Helvetica',size)
+    words=str(s or '').split(); line=''; yy=y
+    for wd in words:
+        test=(line+' '+wd).strip()
+        if c.stringWidth(test,'Helvetica',size)>maxw and line:
+            c.drawString(x,yy,line); yy-=size+2; line=wd
+        else: line=test
+    if line:c.drawString(x,yy,line)
 
-def stato_campo(nome, valore):
-    return None if valore not in (None, "", []) else nome
+def gen6(d):
+    def p0(c,w,h):
+        c.setFillColorRGB(1,1,1); c.rect(210,h-160,220,16,fill=1,stroke=0); c.setFillColorRGB(0,0,0)
+        text(c,220,h-154,f"RdA N° {d['rda']}",9,190)
+        text(c,365,h-272,d['fornitore'],8,170)
+        # segno risposta trattamento
+        text(c,470,h-187,'X' if d['tratta']=='Sì' else '',10,20)
+        text(c,515,h-187,'X' if d['tratta']=='No' else '',10,20)
+    return overlay_pdf(T/'allegato6.pdf',{0:p0})
 
-st.title("Generatore documentazione RDA Olivetti")
-st.caption("Versione 0.1 — motore regole + raccolta dati + anteprima. Nessun dato viene inventato.")
+def gen7(d):
+    def p0(c,w,h):
+        text(c,420,h-173,d['data'].strftime('%d/%m/%Y'),8,120)
+        text(c,65,h-220,d['funzione'],9,580)
+        text(c,65,h-267,d['fornitore'],9,580)
+        text(c,65,h-330,d['oggetto'],8,580)
+        desc=d['descrizione'] or f"Fabbisogno relativo alla commessa {d['commessa']} - cliente/gara {d['cliente']}."
+        text(c,65,h-455,desc,8,580)
+        text(c,80,120,'€ '+fmt(d['totale']),10,250)
+    return overlay_pdf(T/'allegato7.pdf',{0:p0})
 
-with st.sidebar:
-    st.header("Modelli")
-    st.info(
-        "Nella prossima fase collegheremo i modelli PDF/DOCX reali. "
-        "Questa versione decide quali documenti servono e raccoglie i dati necessari."
-    )
+def gen3a(d):
+    # Il modello 3A è pagina 2 del PDF complessivo: estraiamo solo quella pagina e compiliamo i campi principali.
+    r=PdfReader(str(T/'allegato3.pdf')); base=PdfWriter(); base.add_page(r.pages[1]); tmp=BytesIO(); base.write(tmp); tmp.seek(0)
+    rr=PdfReader(tmp); p=rr.pages[0]; w=float(p.mediabox.width); h=float(p.mediabox.height)
+    b=BytesIO(); c=canvas.Canvas(b,pagesize=(w,h))
+    text(c,72,h-152,d['fornitore'],8,150); text(c,270,h-152,d['sap'],8,90); text(c,445,h-152,d['piva'],8,100)
+    text(c,75,h-194,'€ '+fmt(d['totale']),8,120); text(c,450,h-194,d['rda'],8,100)
+    text(c,75,h-250,d['casistica'],7,460)
+    text(c,75,h-300,d['descrizione'],7,460)
+    text(c,75,h-375,d['tecnologia'],7,200)
+    text(c,75,h-650,d['cliente'],8,400)
+    c.save(); b.seek(0); p.merge_page(PdfReader(b).pages[0]); out=BytesIO(); ww=PdfWriter(); ww.add_page(p); ww.write(out); return out.getvalue()
 
-st.subheader("1. Dati della RDA")
-c1, c2, c3 = st.columns(3)
+def make_zip(d,docs):
+    zbuf=BytesIO()
+    with zipfile.ZipFile(zbuf,'w',zipfile.ZIP_DEFLATED) as z:
+        if '6' in docs:z.writestr(f"RDA_{d['rda']}_Allegato_6.pdf",gen6(d))
+        if '7' in docs:z.writestr(f"RDA_{d['rda']}_Allegato_7.pdf",gen7(d))
+        if '3A' in docs:z.writestr(f"RDA_{d['rda']}_Allegato_3A.pdf",gen3a(d))
+        if '4' in docs:z.write(T/'allegato4.docx',f"RDA_{d['rda']}_Allegato_4.docx")
+        if '5' in docs:z.write(T/'allegato5.docx',f"RDA_{d['rda']}_Allegato_5.docx")
+        if '1' in docs:z.write(T/'allegato1_casistiche.pdf',f"RDA_{d['rda']}_Allegato_1.pdf")
+        if 'OFFERTA' in docs:z.writestr('INSERIRE_OFFERTA.txt','Inserire qui il file di offerta della RDA. Il programma non inventa né sostituisce l’offerta del fornitore.')
+    return zbuf.getvalue()
+
+st.set_page_config(page_title='Generatore RDA Olivetti',page_icon='📄',layout='wide')
+st.title('Generatore documentazione RDA Olivetti')
+st.caption('v0.2 - genera materialmente il pacchetto di allegati dai modelli reali caricati.')
+
+c1,c2,c3=st.columns(3)
 with c1:
-    fornitore = st.text_input("Intestatario / Ragione sociale")
-    codice_sap = st.text_input("Codice SAP fornitore")
-    numero_rda = st.text_input("Numero RDA")
+    fornitore=st.text_input('Intestatario / Ragione sociale'); sap=st.text_input('Codice SAP fornitore'); rda=st.text_input('Numero RDA')
 with c2:
-    data_rda = st.date_input("Data RDA", value=date.today())
-    commessa = st.text_input("Rif. Commessa")
-    cliente = st.text_input("Cliente / Gara")
+    data_rda=st.date_input('Data RDA'); commessa=st.text_input('Rif. Commessa'); cliente=st.text_input('Cliente / Gara')
 with c3:
-    totale_testo = st.text_input("Totale RDA", placeholder="es. 23.200,00")
-    oggetto = st.text_area("Oggetto", height=115)
+    totale_s=st.text_input('Totale RDA',placeholder='23.200,00'); oggetto=st.text_area('Oggetto',height=110)
+tot=money(totale_s)
 
-totale = euro_to_decimal(totale_testo)
+c1,c2,c3=st.columns(3)
+with c1: deroga=st.radio('In deroga / TD?', ['No','Sì'],horizontal=True)=='Sì'
+with c2: tratta=st.radio('Tratta dati personali?', ['No','Sì','Da verificare'],horizontal=True)
+with c3: funzione=st.text_input('Funzione richiedente')
 
-st.subheader("2. Informazioni decisionali")
-c1, c2, c3 = st.columns(3)
-with c1:
-    deroga = st.radio("RDA in deroga / Trattativa Diretta?", ["No", "Sì"], horizontal=True) == "Sì"
-with c2:
-    tratta_dati = st.radio("La fornitura tratta dati personali?", ["No", "Sì", "Da verificare"], horizontal=True)
-with c3:
-    funzione_richiedente = st.text_input("Funzione richiedente", placeholder="es. P&D ...")
+nuova=data_rda>=CUT
+docs=['6','4','7'] if nuova else ['6','1','5','OFFERTA']
+if nuova and deroga:docs.append('OFFERTA')
+if tot>TH:docs.append('3A')
 
-nuova, documenti = calcola_documenti(data_rda, totale, deroga)
-serve_3a = any("3A" in d[0] for d in documenti)
-
-st.subheader("3. Dati aggiuntivi richiesti solo quando servono")
-piva = ""
-periodo_inizio = None
-periodo_fine = None
-casistica_td = ""
-descrizione_esigenza = ""
-tecnologia = ""
-continuita = "Da verificare"
-fornitore_impegnato = "Da verificare"
-stato_fornitura = "Da verificare"
-
-if serve_3a:
-    st.warning("Il vademecum richiede l'Allegato 3A perché il totale supera 20.000 €.")
-    a, b = st.columns(2)
-    with a:
-        piva = st.text_input("P.IVA fornitore *")
-        casistica_td = st.selectbox("Casistica Trattativa Diretta *", [""] + CASISTICHE_TD)
-        periodo_inizio = st.date_input("Inizio fornitura", value=data_rda)
-        continuita = st.selectbox("Attività in continuità con lo stesso fornitore?", ["Da verificare", "No", "Sì"])
-    with b:
-        periodo_fine = st.date_input("Fine fornitura", value=data_rda)
-        tecnologia = st.text_input("Tecnologia (se applicabile)")
-        fornitore_impegnato = st.selectbox("Fornitore già impegnato?", ["Da verificare", "No", "Sì"])
-        stato_fornitura = st.selectbox("Stato della fornitura", ["Da verificare", "Non iniziata", "In corso", "Completata"])
-    descrizione_esigenza = st.text_area(
-        "Descrizione dettagliata dell'esigenza / motivazione TD *",
-        placeholder="Descrivere in modo chiaro e circostanziato. Il programma non inventerà questa motivazione.",
-        height=120,
-    )
+piva=casistica=descrizione=tecnologia=''
+if '3A' in docs:
+    st.subheader('Dati Allegato 3A')
+    a,b=st.columns(2)
+    with a:piva=st.text_input('P.IVA fornitore'); casistica=st.selectbox('Casistica TD',['']+CASI)
+    with b:tecnologia=st.text_input('Tecnologia (se applicabile)')
+    descrizione=st.text_area('Descrizione dettagliata / motivazione TD',height=110)
 else:
-    periodo_inizio = st.date_input("Inizio fornitura (se noto)", value=data_rda)
-    periodo_fine = st.date_input("Fine fornitura (se noto)", value=data_rda)
+    descrizione=st.text_area('Descrizione esigenza per Allegato 7 (facoltativa)',height=80)
 
-if tratta_dati == "Sì":
-    st.markdown("**Dettagli Allegato 6**")
-    tipo_dati = st.multiselect(
-        "Dati personali trattati",
-        ["Dati comuni", "Dati particolari", "Videosorveglianza", "Dati di traffico", "Geolocalizzazione", "Altro"],
-    )
-    interessati = st.multiselect(
-        "Soggetti interessati",
-        ["Clienti TIM/SdG", "Dipendenti TIM/SdG", "Fornitori/consulenti", "Visitatori", "Clienti/Dipendenti di Clienti", "Altro"],
-    )
-    tipo_trattamento = st.multiselect(
-        "Tipi di trattamento",
-        ["Prestazioni professionali/consulenziali", "Servizi amministrativi", "Gestione documentale",
-         "Logistica/reception/vigilanza", "Servizi IT", "Servizi tecnici", "Altro"],
-    )
+st.subheader('Documenti previsti')
+labels={'6':'Allegato 6 - trattamento dati (firma)','4':'Allegato 4 - sicurezza (no firma)','7':'Allegato 7 - razionali (firma)','3A':'Allegato 3A - TD (firma)','1':'Allegato 1 - vecchia procedura','5':'Allegato 5 - scheda motivazionale (firma)','OFFERTA':'Offerta'}
+for x in docs:st.write('✓ '+labels[x])
+
+missing=[]
+for n,v in [('Ragione sociale',fornitore),('Codice SAP',sap),('Numero RDA',rda),('Cliente/Gara',cliente),('Oggetto',oggetto),('Funzione richiedente',funzione)]:
+    if not v:missing.append(n)
+if tot<=0:missing.append('Totale valido')
+if tratta=='Da verificare':missing.append('Trattamento dati')
+if '3A' in docs:
+    if not piva:missing.append('P.IVA')
+    if not casistica:missing.append('Casistica TD')
+    if not descrizione:missing.append('Descrizione/motivazione TD')
+
+if missing:st.error('Da completare: '+' • '.join(missing))
 else:
-    tipo_dati, interessati, tipo_trattamento = [], [], []
+    d={'fornitore':fornitore,'sap':sap,'rda':rda,'data':data_rda,'commessa':commessa,'cliente':cliente,'totale':tot,'oggetto':oggetto,'funzione':funzione,'tratta':tratta,'piva':piva,'casistica':casistica,'descrizione':descrizione,'tecnologia':tecnologia}
+    payload=make_zip(d,docs)
+    st.success('Pacchetto pronto.')
+    st.download_button('GENERA E SCARICA DOCUMENTI',payload,file_name=f'RDA_{rda}_documentazione.zip',mime='application/zip',type='primary')
 
-st.divider()
-st.subheader("4. Documentazione calcolata")
-st.write(
-    f"Procedura applicata: **{'NUOVA (dal 15/04/2026)' if nuova else 'PRECEDENTE al 15/04/2026'}** "
-    f"— Totale interpretato: **€ {totale:,.2f}**".replace(",", "X").replace(".", ",").replace("X", ".")
-)
-
-for nome, firma, motivo in documenti:
-    st.success(f"✓ {nome} — {'DA FIRMARE' if firma else 'NO FIRMA'} — {motivo}")
-
-# Controlli bloccanti / warning
-mancanti = []
-for nome, valore in [
-    ("Ragione sociale", fornitore),
-    ("Codice SAP", codice_sap),
-    ("Numero RDA", numero_rda),
-    ("Cliente/Gara", cliente),
-    ("Oggetto", oggetto),
-    ("Funzione richiedente", funzione_richiedente),
-]:
-    x = stato_campo(nome, valore)
-    if x:
-        mancanti.append(x)
-
-if totale <= 0:
-    mancanti.append("Totale RDA valido")
-
-if serve_3a:
-    for nome, valore in [
-        ("P.IVA fornitore", piva),
-        ("Casistica TD", casistica_td),
-        ("Descrizione/motivazione TD", descrizione_esigenza),
-    ]:
-        x = stato_campo(nome, valore)
-        if x:
-            mancanti.append(x)
-
-if tratta_dati == "Da verificare":
-    mancanti.append("Verifica trattamento dati personali")
-elif tratta_dati == "Sì" and (not tipo_dati or not interessati or not tipo_trattamento):
-    mancanti.append("Dettagli trattamento dati personali")
-
-st.subheader("5. Controllo prima della generazione")
-if mancanti:
-    st.error("Campi da completare prima della generazione: " + " • ".join(mancanti))
-else:
-    st.success("Controlli principali superati. I dati sono pronti per il motore di compilazione.")
-
-with st.expander("Anteprima dati strutturati"):
-    st.json({
-        "fornitore": fornitore,
-        "codice_sap": codice_sap,
-        "numero_rda": numero_rda,
-        "data_rda": str(data_rda),
-        "commessa": commessa,
-        "cliente_gara": cliente,
-        "totale": str(totale),
-        "oggetto": oggetto,
-        "deroga_td": deroga,
-        "tratta_dati_personali": tratta_dati,
-        "funzione_richiedente": funzione_richiedente,
-        "piva": piva,
-        "periodo_inizio": str(periodo_inizio) if periodo_inizio else "",
-        "periodo_fine": str(periodo_fine) if periodo_fine else "",
-        "casistica_td": casistica_td,
-        "descrizione_esigenza": descrizione_esigenza,
-        "tecnologia": tecnologia,
-        "continuita": continuita,
-        "fornitore_impegnato": fornitore_impegnato,
-        "stato_fornitura": stato_fornitura,
-        "documenti_da_generare": [d[0] for d in documenti],
-    })
-
-if st.button("GENERA DOCUMENTI", type="primary", disabled=bool(mancanti)):
-    st.info(
-        "Motore di compilazione documenti non ancora collegato nella v0.1. "
-        "La logica e i controlli sono pronti; il prossimo modulo compilerà i modelli PDF/DOCX."
-    )
+st.info('Nota v0.2: Allegati 6, 7 e 3A vengono compilati automaticamente sui PDF originali. Gli allegati statici di sicurezza/casistiche vengono copiati dal modello. La scheda motivazionale vecchia è inclusa come modello nella procedura precedente e sarà resa compilabile campo-per-campo nella revisione successiva.')
