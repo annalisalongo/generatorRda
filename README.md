@@ -1,25 +1,18 @@
-# Generatore RDA Olivetti v0.5
+# Generatore RDA Olivetti v0.5.5
 
-## Novità
-La v0.5 parte dai documenti reali:
-1. carica l'**Offerta PDF**;
-2. carica la **Richiesta RDA PDF**;
-3. opzionalmente carica il **file Excel** e indica la riga;
-4. l'app estrae i dati e li mostra per controllo/correzione;
-5. scegli **Li indico io** per indicare direttamente gli allegati oppure **Determina automaticamente**;
-6. genera il pacchetto ZIP.
+Novità rispetto alla v0.5.3:
 
-L'app non inventa i campi che non trova: li lascia vuoti e richiede verifica manuale.
-
-## Installazione
-```bash
-pip install -r requirements.txt
-```
+- Tutti gli allegati generati usano il formato nome completo:
+  `RDA <numero> ALLEGATO <n> - <nome ufficiale>.<estensione>`
+- Esempio Allegato 7:
+  `RDA 2101417276 ALLEGATO 7 - Razionali per RDA_modulo razionali dimensionanti dei fabbisogni e prezzi di riferimento di definizione budget RdA.docx`
+- L'Allegato 6 inserisce automaticamente nella sezione firme:
+  `Paolo Sigismondi - 1° Riporto`
+- Restano invariati il flusso Offerta + Richiesta RDA + riga Excel incollata, la lettura automatica degli allegati e il generatore argomentato dell'Allegato 7.
 
 ## Avvio
+
 ```bash
+pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Nota
-Il parser è euristico: funziona sui modelli RDA/offerta simili agli esempi usati nello sviluppo, ma i dati estratti vanno sempre controllati nella schermata di revisione prima della generazione.

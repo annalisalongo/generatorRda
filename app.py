@@ -345,25 +345,67 @@ def xml_replace(src,dst,repls,occurrence_repls=None,black_replacements=None):
             zout.writestr(item,data)
 
 
+def _xml_replace_paragraph_preserve_style(src, out, replacements):
+    """Sostituisce testo anche quando Word lo spezza in piu' run.
+    Conserva il w:rPr del primo run della risposta, quindi font/colore/dimensione restano quelli del template.
+    """
+    from zipfile import ZipFile, ZIP_DEFLATED
+    from lxml import etree
+    W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    XMLSPACE = '{http://www.w3.org/XML/1998/namespace}space'
+    with ZipFile(src,'r') as zin, ZipFile(out,'w',ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data=zin.read(item.filename)
+            if item.filename.endswith('.xml'):
+                try:
+                    root=etree.fromstring(data)
+                    for pnode in root.iter(W+'p'):
+                        # Evita i paragrafi contenitore di textbox/oggetti che includono altri w:p:
+                        # lavoriamo solo sui paragrafi foglia, così ogni risposta viene sostituita una sola volta.
+                        if any(x is not pnode for x in pnode.iter(W+'p')):
+                            continue
+                        tnodes=list(pnode.iter(W+'t'))
+                        if not tnodes: continue
+                        for old,new in replacements.items():
+                            full=''.join(n.text or '' for n in tnodes)
+                            pos=full.find(old)
+                            if pos < 0: continue
+                            endpos=pos+len(old)
+                            spans=[]; cur=0
+                            for n in tnodes:
+                                txt=n.text or ''; spans.append((n,cur,cur+len(txt))); cur+=len(txt)
+                            touched=[x for x in spans if x[1] < endpos and x[2] > pos]
+                            if not touched: continue
+                            first=touched[0][0]; last=touched[-1][0]
+                            prefix=(first.text or '')[:max(0,pos-touched[0][1])]
+                            suffix=(last.text or '')[max(0,endpos-touched[-1][1]):]
+                            first.text=prefix+str(new)+suffix
+                            if first.text.startswith(' ') or first.text.endswith(' '): first.set(XMLSPACE,'preserve')
+                            for n,_,_ in touched[1:]: n.text=''
+                    data=etree.tostring(root,xml_declaration=True,encoding='UTF-8',standalone=True)
+                except Exception:
+                    pass
+            zout.writestr(item,data)
+
+
 def make7(d,out):
+    """Compila l'Allegato 7 usando allegato7.docx come master grafico.
+    Le domande non vengono toccate; ogni risposta conserva esattamente lo stile grigio del template.
+    """
     qty = _qty_from_object(d.get('oggetto',''), '')
     oggetto7 = d.get('oggetto_all7') or clean_all7_object(d.get('oggetto',''), qty)
+    prezzo = fmt_eur(d.get('totale',0))
+    prezzo_raz = (d.get('prezzo_razionale') or 'Valore definito sulla base dell’offerta').strip().rstrip('.')
     repl={
-      '21/09/2026':d.get('data',''), 'OLIVETTI - P&DI CPP':d.get('funzione',''),
-      'ANTONIO SCUCCIMARRA':d.get('fornitore',''),
-      'Nota Spese Giugno, CB Centro Sud Puglia - Acque del Sud':oggetto7,
-      'supporto per attività commerciale propedeutica alla riuscita del Progetto Water Management System gestito da Portfolio IoT':d.get('motivazione',''),
-      '216,40':fmt_eur(d.get('totale',0)).replace('€ ',''),
-      'Valore definito':d.get('prezzo_razionale','Valore definito sulla base dell’offerta').rstrip('.'),
-      'sulla base dell’offerta':''
+      '21/09/2026': d.get('data',''),
+      'OLIVETTI - P&DI CPP': d.get('funzione',''),
+      'ANTONIO SCUCCIMARRA': d.get('fornitore',''),
+      'Nota Spese Giugno, CB Centro Sud Puglia - Acque del Sud': oggetto7,
+      'supporto per attività commerciale propedeutica alla riuscita del Progetto Water Management System gestito da Portfolio IoT': d.get('motivazione',''),
+      '216,40': prezzo.replace('€ ','').strip(),
+      'Valore definito sulla base dell’offerta': prezzo_raz,
     }
-    black={
-      'OLIVETTI - P&DI CPP','ANTONIO SCUCCIMARRA',
-      'Nota Spese Giugno, CB Centro Sud Puglia - Acque del Sud',
-      'supporto per attività commerciale propedeutica alla riuscita del Progetto Water Management System gestito da Portfolio IoT',
-      '216,40','Valore definito','sulla base dell’offerta'
-    }
-    xml_replace(T/'allegato7.docx',out,repl,black_replacements=black)
+    _xml_replace_paragraph_preserve_style(T/'allegato7.docx', out, repl)
 
 
 def _replace_text_preserve_runs(paragraph, old, new, occurrence=1):
@@ -412,6 +454,13 @@ def make6(d,out):
         if p.text.startswith('Riferimenti (*):') and 'Fornitore:' in p.text:
             _replace_text_preserve_runs(p, 'Scrivere qui', d.get('riferimenti',''), 1)
             _replace_text_preserve_runs(p, 'Scrivere qui', d.get('fornitore',''), 1)
+        elif p.text.startswith('1° Riporto') and 'Responsabile primo riporto di PR' in p.text:
+            # Riga firme a due colonne del modello:
+            # SX: Responsabile Richiedente -> Paolo Sigismondi - 1° Riporto
+            # DX: Responsabile di PR       -> 1° Riporto
+            # Sostituiamo i due testi nei run esistenti, senza ricreare il paragrafo.
+            _replace_text_preserve_runs(p, '1° Riporto', 'Paolo Sigismondi - 1° Riporto', 1)
+            _replace_text_preserve_runs(p, 'Responsabile primo riporto di PR', '1° Riporto', 1)
     doc.save(out)
 
 
