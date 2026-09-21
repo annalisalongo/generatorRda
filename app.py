@@ -412,13 +412,6 @@ def make6(d,out):
         if p.text.startswith('Riferimenti (*):') and 'Fornitore:' in p.text:
             _replace_text_preserve_runs(p, 'Scrivere qui', d.get('riferimenti',''), 1)
             _replace_text_preserve_runs(p, 'Scrivere qui', d.get('fornitore',''), 1)
-        elif p.text.startswith('1° Riporto') and 'Responsabile primo riporto di PR' in p.text:
-            # Riga firme a due colonne del modello:
-            # SX: Responsabile Richiedente -> Paolo Sigismondi - 1° Riporto
-            # DX: Responsabile di PR       -> 1° Riporto
-            # Sostituiamo i due testi nei run esistenti, senza ricreare il paragrafo.
-            _replace_text_preserve_runs(p, '1° Riporto', 'Paolo Sigismondi - 1° Riporto', 1)
-            _replace_text_preserve_runs(p, 'Responsabile primo riporto di PR', '1° Riporto', 1)
     doc.save(out)
 
 
