@@ -4,7 +4,6 @@ from datetime import datetime
 import streamlit as st
 from docx import Document
 from pypdf import PdfReader
-from openpyxl import load_workbook
 
 BASE = Path(__file__).parent
 T = BASE / 'templates'
@@ -107,39 +106,72 @@ def extract_rda(text):
     return d
 
 
-def extract_excel(upload, row_number=None):
-    if not upload: return {}, []
-    try:
-        wb = load_workbook(io.BytesIO(upload.getvalue()), data_only=True, read_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
-        if not rows: return {}, []
-        headers = [str(x or '').strip() for x in rows[0]]
-        data_rows = rows[1:]
-        if not data_rows: return {}, headers
-        idx = max(0, min((row_number or 2)-2, len(data_rows)-1))
-        vals = data_rows[idx]
-        raw = {headers[i]: vals[i] for i in range(min(len(headers),len(vals))) if headers[i]}
-        return raw, headers
-    except Exception as e:
-        st.warning(f'Non riesco a leggere il file Excel: {e}')
+def parse_pasted_excel_row(text):
+    """Legge una singola riga copiata da Excel (celle separate da TAB).
+    Supporta la Bibbia RDA sia con sia senza la colonna 'RDA Gestita da F / C'.
+    """
+    text = str(text or '').strip('\r\n')
+    if not text.strip():
         return {}, []
+    # Excel copia le celle con TAB; conserva anche le celle vuote.
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return {}, []
+    # Se l'utente ha incollato intestazione + riga, usa l'intestazione reale.
+    if len(lines) >= 2 and ('ragione sociale' in lines[0].lower() or 'n. rda' in lines[0].lower()):
+        headers = lines[0].split('\t')
+        vals = lines[1].split('\t')
+    else:
+        vals = lines[0].split('\t')
+        headers14 = ['Intestatario - Ragione sociale','COD. SAP FORNITORE','Allegati alla RDA','n. RDA','DATA RDA','n. ODA','DATA ODA','EM','DATA EM','Economics OK','Rif. Commessa','Cliente / Gara','Totale','OGGETTO']
+        headers15 = ['Intestatario - Ragione sociale','COD. SAP FORNITORE','Allegati alla RDA','n. RDA','DATA RDA','RDA Gestita da F / C','n. ODA','DATA ODA','EM','DATA EM','Economics OK','Rif. Commessa','Cliente / Gara','Totale','OGGETTO']
+        headers = headers15 if len(vals) >= 15 else headers14
+    # Non comprimere celle vuote: la posizione delle colonne è significativa.
+    raw = {str(headers[i]).strip(): vals[i].strip() if i < len(vals) else '' for i in range(min(len(headers), len(vals)))}
+    extras = vals[len(headers):] if len(vals) > len(headers) else []
+    return raw, extras
 
 
-def excel_map(raw):
+def pasted_row_map(raw):
     out = {}
     for k,v in raw.items():
-        lk = k.lower()
-        if 'rda' in lk and ('n.' in lk or 'numero' in lk or lk.strip()=='n. rda'): out['rda'] = str(v or '').strip()
-        elif 'sap' in lk and 'forn' in lk: out['sap'] = str(v or '').strip()
-        elif 'ragione' in lk or ('fornitore' in lk and 'cod' not in lk): out['fornitore'] = str(v or '').strip()
-        elif 'totale' in lk: out['totale'] = euro(v)
-        elif 'commessa' in lk: out['commessa'] = str(v or '').strip()
-        elif 'cliente' in lk or 'gara' in lk: out['cliente'] = str(v or '').strip()
-        elif 'oggetto' in lk: out['oggetto'] = str(v or '').strip()
-        elif 'data rda' in lk: out['data'] = str(v or '').strip()
+        lk = k.lower().strip()
+        sv = str(v or '').strip()
+        if 'allegati' in lk and 'rda' in lk:
+            out['allegati_rda'] = sv
+        elif ('n. rda' in lk or 'numero rda' in lk) and 'data' not in lk:
+            out['rda'] = sv
+        elif 'sap' in lk and 'forn' in lk:
+            out['sap'] = sv
+        elif 'ragione' in lk or (lk == 'fornitore'):
+            out['fornitore'] = sv
+        elif 'totale' in lk:
+            out['totale'] = euro(sv)
+        elif 'commessa' in lk:
+            out['commessa'] = sv
+        elif 'cliente' in lk or 'gara' in lk:
+            out['cliente'] = sv
+        elif 'oggetto' in lk:
+            out['oggetto'] = sv
+        elif 'data rda' in lk:
+            out['data'] = sv
     return out
 
+
+def docs_from_attachment_text(text):
+    """Converte la dicitura della colonna 'Allegati alla RDA' nei codici dell'app."""
+    original = str(text or '').strip()
+    t = original.lower()
+    docs=[]
+    # 3A prima del generico 3.
+    if re.search(r'\b(?:all(?:egato)?\.?\s*)?3\s*a\b', t): docs.append('3A')
+    for n in ['1','2','4','6','7','10','11','12','13','14','15','16']:
+        if re.search(rf'\b(?:all(?:egato)?\.?\s*){n}\b', t): docs.append(n)
+    # Dicitura operativa usata nella Bibbia.
+    if re.search(r'req(?:uisiti)?\.?\s*(?:di\s*)?sicurezza|requisiti\s+sicurezza|sicurezza\s*(?:ict)?', t):
+        if '4' not in docs: docs.append('4')
+    if re.search(r'\bofferta\b', t): docs.append('OFFERTA')
+    return list(dict.fromkeys(docs))
 
 def merge_detected(offer, rda, xls):
     # Precedenza: Excel per dati gestionali, RDA per richiesta interna, offerta per dati economici/fornitore precisi.
@@ -174,20 +206,36 @@ def classify_purchase(oggetto):
     return 'hardware'
 
 
-def generate_all7_rationale(d, offer_data=None, rda_data=None):
-    """Genera una bozza argomentata dell'All.7 usando solo dati disponibili."""
+def clean_all7_object(oggetto, qty=''):
+    """Pulisce l'oggetto per l'All.7: una sola quantità e niente riferimenti economici/offerta."""
+    t = re.sub(r'\s+', ' ', str(oggetto or '')).strip()
+    # Rimuove quantità ripetute iniziali: n. 3 N. 3 ... -> contenuto
+    while re.match(r'^\s*n\.\s*\d+\s+', t, re.I):
+        t = re.sub(r'^\s*n\.\s*\d+\s+', '', t, count=1, flags=re.I).strip()
+    # Rimuove riferimenti all'offerta dall'oggetto: vanno nel razionale economico.
+    t = re.sub(r'\s*[-–—]?\s*Offerta\s+[A-Z0-9_./-]+(?:\s+del\s+\d{1,2}/\d{1,2}/20\d{2})?\s*$', '', t, flags=re.I).strip(' -–—')
+    q = str(qty or '').strip()
+    return (f"n. {q} {t}" if q and t else t)
+
+
+def generate_all7_sections(d, offer_data=None, rda_data=None):
+    """Genera separatamente fabbisogno e razionale prezzo per l'Allegato 7."""
     offer_data = offer_data or {}
     rda_data = rda_data or {}
-    oggetto = str(d.get('oggetto') or '').strip()
-    item = _clean_item(oggetto) or 'la fornitura indicata nella richiesta di acquisto'
-    qty = _qty_from_object(oggetto, rda_data.get('quantita',''))
+    raw = str(d.get('oggetto') or '').strip()
+    qty = _qty_from_object(raw, rda_data.get('quantita',''))
+    item = _clean_item(raw)
+    # Elimina eventuale seconda quantità e riferimento offerta anche dalla descrizione.
+    item = re.sub(r'^\s*n\.\s*\d+\s+', '', item, flags=re.I).strip()
+    item = re.sub(r'\s*[-–—]?\s*Offerta\s+[A-Z0-9_./-]+(?:\s+del\s+\d{1,2}/\d{1,2}/20\d{2})?\s*$', '', item, flags=re.I).strip(' -–—')
+    item = item or 'la fornitura indicata nella richiesta di acquisto'
     commessa = str(d.get('commessa') or '').strip()
     cliente = str(d.get('cliente') or '').strip()
-    tipo = classify_purchase(oggetto)
-    low = oggetto.lower()
+    tipo = classify_purchase(raw)
+    low = raw.lower()
 
     if commessa and cliente:
-        scope = f" nell'ambito della commessa {commessa}, relativa al progetto/cliente {cliente}"
+        scope = f" nell'ambito della commessa {commessa}, relativa al progetto {cliente}"
     elif commessa:
         scope = f" nell'ambito della commessa {commessa}"
     elif cliente:
@@ -206,7 +254,7 @@ def generate_all7_rationale(d, offer_data=None, rda_data=None):
     else:
         bisogno = f"Necessità di acquisire {qtxt}{item}{scope}."
         if qty:
-            bisogno += " La quantità richiesta corrisponde al fabbisogno definito dal progetto e dalle specifiche tecniche della commessa."
+            bisogno += " Il quantitativo richiesto è stato determinato sulla base del fabbisogno progettuale e delle specifiche tecniche previste per la commessa."
         else:
             bisogno += " Il fabbisogno è quello indicato nella richiesta di acquisto e nella documentazione tecnica disponibile."
 
@@ -215,22 +263,20 @@ def generate_all7_rationale(d, offer_data=None, rda_data=None):
     supplier = str(d.get('fornitore') or '').strip()
     total = float(d.get('totale') or 0)
     if off_num:
-        ref = f"offerta {off_num}"
+        ref = f"offerta {supplier + ' ' if supplier else ''}{off_num}"
         if off_date:
             ref += f" del {off_date}"
-        if supplier:
-            ref += f" presentata da {supplier}"
-        prezzo = f"Il prezzo di riferimento è stato determinato sulla base dell'{ref}"
-        if total:
-            prezzo += f", per un importo complessivo pari a {fmt_eur(total)}"
-        prezzo += "."
-    elif total and supplier:
-        prezzo = f"Il prezzo di riferimento è quello risultante dalla documentazione economica del fornitore {supplier}, per un importo complessivo pari a {fmt_eur(total)}."
-    elif total:
-        prezzo = f"Il prezzo di riferimento risultante dalla documentazione disponibile è pari a {fmt_eur(total)}."
+        prezzo = f"Valore definito sulla base dell'{ref}."
+    elif supplier:
+        prezzo = f"Valore definito sulla base della documentazione economica presentata da {supplier}."
     else:
-        prezzo = "Prezzo di riferimento da completare: nei documenti caricati non è stato individuato un valore economico sufficientemente affidabile."
+        prezzo = "Valore definito sulla base della documentazione economica disponibile."
+    return bisogno, prezzo
 
+
+def generate_all7_rationale(d, offer_data=None, rda_data=None):
+    """Compatibilità: restituisce le due sezioni in un unico testo."""
+    bisogno, prezzo = generate_all7_sections(d, offer_data, rda_data)
     return bisogno + "\n\n" + prezzo
 
 def decide(d):
@@ -252,37 +298,72 @@ def decide(d):
     return list(dict.fromkeys(docs)), reasons
 
 
-def xml_replace(src,dst,repls,occurrence_repls=None):
+def xml_replace(src,dst,repls,occurrence_repls=None,black_replacements=None):
     from lxml import etree
     occurrence_repls=occurrence_repls or []; counts={}
+    black_replacements=set(black_replacements or [])
+    W='{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
     with zipfile.ZipFile(src,'r') as zin, zipfile.ZipFile(dst,'w',zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
             data=zin.read(item.filename)
             if item.filename.endswith('.xml'):
                 try:
                     root=etree.fromstring(data)
+                    if black_replacements:
+                        for color_node in root.xpath('//*[local-name()="color" and translate(@*[local-name()="val"], "abcdef", "ABCDEF")="808080"]'):
+                            color_node.set(W+'val','000000')
                     for node in root.xpath('//*[local-name()="t"]'):
                         if node.text is None: continue
                         text=node.text
-                        for a,b in repls.items(): text=text.replace(a,str(b)) if a in text else text
+                        touched=False
+                        for a,b in repls.items():
+                            if a in text:
+                                text=text.replace(a,str(b)); touched = touched or a in black_replacements
                         for old,new,n in occurrence_repls:
                             if old in text:
                                 counts[old]=counts.get(old,0)+1
                                 if counts[old]==n: text=text.replace(old,str(new),1)
                         node.text=text
+                        if touched:
+                            run=node.getparent()
+                            rpr=run.find(W+'rPr')
+                            if rpr is None:
+                                rpr=etree.Element(W+'rPr'); run.insert(0,rpr)
+                            color=rpr.find(W+'color')
+                            if color is None:
+                                color=etree.SubElement(rpr,W+'color')
+                            color.set(W+'val','000000')
+                            # Mantiene il corpo compatto del modello (9 pt) per evitare overflow.
+                            sz=rpr.find(W+'sz')
+                            if sz is None: sz=etree.SubElement(rpr,W+'sz')
+                            sz.set(W+'val','18')
+                            szcs=rpr.find(W+'szCs')
+                            if szcs is None: szcs=etree.SubElement(rpr,W+'szCs')
+                            szcs.set(W+'val','18')
                     data=etree.tostring(root,xml_declaration=True,encoding='UTF-8',standalone=True)
                 except Exception: pass
             zout.writestr(item,data)
 
 
 def make7(d,out):
+    qty = _qty_from_object(d.get('oggetto',''), '')
+    oggetto7 = d.get('oggetto_all7') or clean_all7_object(d.get('oggetto',''), qty)
     repl={
       '21/09/2026':d.get('data',''), 'OLIVETTI - P&DI CPP':d.get('funzione',''),
       'ANTONIO SCUCCIMARRA':d.get('fornitore',''),
-      'Nota Spese Giugno, CB Centro Sud Puglia - Acque del Sud':d.get('oggetto',''),
+      'Nota Spese Giugno, CB Centro Sud Puglia - Acque del Sud':oggetto7,
       'supporto per attività commerciale propedeutica alla riuscita del Progetto Water Management System gestito da Portfolio IoT':d.get('motivazione',''),
-      '216,40':fmt_eur(d.get('totale',0)).replace('€ ','')}
-    xml_replace(T/'allegato7.docx',out,repl)
+      '216,40':fmt_eur(d.get('totale',0)).replace('€ ',''),
+      'Valore definito':d.get('prezzo_razionale','Valore definito sulla base dell’offerta').rstrip('.'),
+      'sulla base dell’offerta':''
+    }
+    black={
+      'OLIVETTI - P&DI CPP','ANTONIO SCUCCIMARRA',
+      'Nota Spese Giugno, CB Centro Sud Puglia - Acque del Sud',
+      'supporto per attività commerciale propedeutica alla riuscita del Progetto Water Management System gestito da Portfolio IoT',
+      '216,40','Valore definito','sulla base dell’offerta'
+    }
+    xml_replace(T/'allegato7.docx',out,repl,black_replacements=black)
 
 
 def make6(d,out):
@@ -330,25 +411,24 @@ def package(d,docs,offer_bytes=None,offer_name=None):
     return z.getvalue()
 
 
-st.set_page_config(page_title='Generatore RDA Olivetti v0.5.1',layout='wide')
-st.title('Generatore RDA Olivetti — v0.5.1')
-st.caption('Carica Offerta + Richiesta RDA + riga Excel. L’app estrae i dati, te li fa verificare e poi genera gli allegati scelti.')
+st.set_page_config(page_title='Generatore RDA Olivetti v0.5.3',layout='wide')
+st.title('Generatore RDA Olivetti — v0.5.3')
+st.caption('Carica Offerta + Richiesta RDA e incolla una riga copiata dalla Bibbia Excel. L’app estrae i dati e legge anche gli allegati da generare.')
 
-st.subheader('1. Carica i documenti di partenza')
-a,b,c=st.columns(3)
+st.subheader('1. Documenti e riga della Bibbia Excel')
+a,b=st.columns(2)
 with a: offer_file=st.file_uploader('OFFERTA fornitore',type=['pdf'],key='offer')
 with b: rda_file=st.file_uploader('RICHIESTA RDA',type=['pdf'],key='rda_pdf')
-with c:
-    excel_file=st.file_uploader('FILE EXCEL (opzionale)',type=['xlsx','xlsm'],key='xls')
-    excel_row=st.number_input('Numero riga Excel da leggere',min_value=2,value=2,step=1,disabled=not bool(excel_file))
+excel_paste=st.text_area('📋 Incolla qui UNA RIGA copiata da Excel',height=105,placeholder='Seleziona l’intera riga nella Bibbia Excel → Copia → Incolla qui. Le celle restano separate automaticamente.')
 
 offer_data=extract_offer(pdf_text(offer_file)) if offer_file else {}
 rda_data=extract_rda(pdf_text(rda_file)) if rda_file else {}
-raw_xls,_=extract_excel(excel_file,int(excel_row)) if excel_file else ({},[])
-xls_data=excel_map(raw_xls)
+raw_xls,extra_xls=parse_pasted_excel_row(excel_paste)
+xls_data=pasted_row_map(raw_xls)
+docs_excel=docs_from_attachment_text(xls_data.get('allegati_rda',''))
 detected=merge_detected(offer_data,rda_data,xls_data)
 
-if offer_file or rda_file or excel_file:
+if offer_file or rda_file or excel_paste.strip():
     st.subheader('2. Dati trovati automaticamente — controlla/correggi')
     st.caption('I campi vuoti non sono stati trovati con sufficiente affidabilità: compilali tu. Il programma non inventa dati mancanti.')
     c1,c2,c3=st.columns(3)
@@ -375,20 +455,34 @@ if offer_file or rda_file or excel_file:
     with st.expander('Mostra cosa è stato letto dai tre input'):
         st.write('**Offerta:**', offer_data or 'nessun dato')
         st.write('**Richiesta RDA:**', rda_data or 'nessun dato')
-        st.write('**Riga Excel:**', raw_xls or 'nessun dato')
+        st.write('**Riga Excel incollata:**', raw_xls or 'nessun dato')
+        st.write('**Allegati letti dalla riga:**', docs_excel or 'nessun allegato riconosciuto')
 
-    st.subheader('3. Scegli come determinare gli allegati')
-    mode=st.radio('Modalità', ['Li indico io','Determina automaticamente'],horizontal=True)
+    st.subheader('3. Allegati da generare')
+    allegati_testo=xls_data.get('allegati_rda','')
+    if allegati_testo:
+        st.success('Dalla riga Excel: ' + allegati_testo)
+    if docs_excel:
+        st.write('**Riconosciuti automaticamente:** ' + ', '.join(docs_excel))
+        mode=st.radio('Modalità', ['Usa gli allegati della riga Excel','Modifica manualmente','Determina automaticamente'],horizontal=True)
+    else:
+        st.warning('Nella riga incollata non ho riconosciuto la colonna allegati: puoi indicarli manualmente o usare il controllo automatico.')
+        mode=st.radio('Modalità', ['Modifica manualmente','Determina automaticamente'],horizontal=True)
 
     # defaults shared by both modes
     flags={k:False for k in ['nuova_tranche_senza_variazione','precontrattuale','deroga','side_letter','gara_prest_prof','saas','trattamento_cliente','amministratore_sistema','trattamento_dati','attestazione_conformita']}
     cliente_tipo='n.a.'; casistica_td=''
 
-    if mode=='Li indico io':
-        default_docs=['4','6','7'] + (['3A'] if totale>20000 else [])
+    if mode=='Usa gli allegati della riga Excel':
+        docs=docs_excel
+        st.caption('La colonna “Allegati alla RDA” della Bibbia è la fonte principale. Il motore non aggiunge allegati da solo.')
+        if '3A' in docs:
+            casistica_td=st.selectbox('Casistica TD per il 3A (se applicabile)',['']+CASI_TD)
+    elif mode=='Modifica manualmente':
+        default_docs=docs_excel or (['4','6','7'] + (['3A'] if totale>20000 else []))
         selected_docs=st.multiselect('Allegati da generare',ALL_DOCS,default=default_docs)
         docs=selected_docs
-        st.caption('In questa modalità la tua scelta prevale sul motore decisionale.')
+        st.caption('Puoi correggere la selezione letta dalla riga Excel.')
         if '3A' in docs:
             casistica_td=st.selectbox('Casistica TD per il 3A (se applicabile)',['']+CASI_TD)
     else:
@@ -419,32 +513,37 @@ if offer_file or rda_file or excel_file:
     # Allegato 7: razionale automatico, sempre verificabile e modificabile
     base_for_7=dict(rda=rda,fornitore=fornitore,sap=sap,piva=piva,totale=totale,data=data,commessa=commessa,
                     cliente=cliente,richiedente=richiedente,funzione=funzione,oggetto=oggetto)
-    auto_razionale = generate_all7_rationale(base_for_7, offer_data, rda_data)
+    bisogno7, prezzo7 = generate_all7_sections(base_for_7, offer_data, rda_data)
     if nota_razionale.strip():
-        parts = auto_razionale.split('\n\n',1)
-        auto_razionale = parts[0] + ' ' + nota_razionale.strip() + ('\n\n' + parts[1] if len(parts)>1 else '')
+        bisogno7 = bisogno7.rstrip() + ' ' + nota_razionale.strip()
+    qty7 = _qty_from_object(oggetto, rda_data.get('quantita',''))
+    oggetto7_default = clean_all7_object(oggetto, qty7)
     if '7' in docs:
-        st.subheader('4. Razionale Allegato 7')
-        st.caption('Bozza generata da Offerta + Richiesta RDA + riga Excel. Controllala e modificala liberamente prima di generare.')
-        motivazione=st.text_area('Testo Allegato 7',value=auto_razionale,height=190)
+        st.subheader('4. Allegato 7 — anteprima contenuti')
+        st.caption('Le tre sezioni restano separate per mantenere pulita la formattazione del modello Word.')
+        oggetto_all7=st.text_area('Oggetto Allegato 7',value=oggetto7_default,height=70)
+        motivazione=st.text_area('Descrizione esigenza / dimensionamento fabbisogno',value=bisogno7,height=150)
+        prezzo_razionale=st.text_area('Razionale del prezzo',value=prezzo7,height=90)
     else:
-        motivazione=auto_razionale
+        oggetto_all7=oggetto7_default
+        motivazione=bisogno7
+        prezzo_razionale=prezzo7
 
     st.subheader('5. Controllo finale')
     missing=[]
     for label,val in [('N. RDA',rda),('Fornitore',fornitore),('Oggetto',oggetto)]:
         if not val: missing.append(label)
     if '3A' in docs and totale<=20000:
-        st.warning('Hai selezionato manualmente il 3A con importo non superiore a €20.000: verrà comunque generato perché in modalità manuale la tua scelta prevale.')
+        st.warning('Il pacchetto include il 3A anche se l’importo non supera €20.000. Verrà generato perché è indicato nella riga Excel o nella selezione manuale: verifica che sia corretto per questa pratica.')
     if missing: st.warning('Da completare prima della generazione: '+', '.join(missing))
     st.write('**Pacchetto:** '+(', '.join(docs) if docs else 'nessun allegato'))
 
     d=dict(rda=rda,fornitore=fornitore,sap=sap,piva=piva,totale=totale,data=data,commessa=commessa,
-           cliente=cliente,richiedente=richiedente,funzione=funzione,oggetto=oggetto,motivazione=motivazione,
+           cliente=cliente,richiedente=richiedente,funzione=funzione,oggetto=oggetto,oggetto_all7=oggetto_all7,motivazione=motivazione,prezzo_razionale=prezzo_razionale,
            riferimenti=riferimenti,consegna=consegna,casistica_td=casistica_td,cliente_tipo=cliente_tipo,**flags)
 
     if st.button('GENERA PACCHETTO RDA',type='primary',disabled=bool(missing or not docs)):
         z=package(d,docs,offer_file.getvalue() if offer_file else None,offer_file.name if offer_file else None)
         st.download_button('Scarica ZIP RDA',z,file_name=f"RDA_{rda}_allegati.zip",mime='application/zip')
 else:
-    st.info('Carica almeno uno dei documenti per iniziare. Il flusso consigliato è: Offerta + Richiesta RDA + file Excel.')
+    st.info('Carica almeno un documento oppure incolla una riga Excel. Flusso consigliato: Offerta + Richiesta RDA + riga copiata dalla Bibbia.')
