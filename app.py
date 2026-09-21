@@ -155,6 +155,84 @@ def merge_detected(offer, rda, xls):
     return d
 
 
+
+def _clean_item(oggetto):
+    return re.sub(r'^\s*n\.\s*\d+\s+', '', str(oggetto or ''), flags=re.I).strip()
+
+
+def _qty_from_object(oggetto, fallback=''):
+    m = re.match(r'^\s*n\.\s*(\d+)\s+', str(oggetto or ''), flags=re.I)
+    return m.group(1) if m else str(fallback or '').strip()
+
+
+def classify_purchase(oggetto):
+    t = str(oggetto or '').lower()
+    if any(k in t for k in ['licenz', 'sql server', 'windows', 'autodesk', 'software', 'subscription', 'cal']):
+        return 'licenze'
+    if any(k in t for k in ['servizio', 'consulenz', 'supporto', 'prestaz', 'giornata uomo', 'nota spese', 'attività profession']):
+        return 'servizi'
+    return 'hardware'
+
+
+def generate_all7_rationale(d, offer_data=None, rda_data=None):
+    """Genera una bozza argomentata dell'All.7 usando solo dati disponibili."""
+    offer_data = offer_data or {}
+    rda_data = rda_data or {}
+    oggetto = str(d.get('oggetto') or '').strip()
+    item = _clean_item(oggetto) or 'la fornitura indicata nella richiesta di acquisto'
+    qty = _qty_from_object(oggetto, rda_data.get('quantita',''))
+    commessa = str(d.get('commessa') or '').strip()
+    cliente = str(d.get('cliente') or '').strip()
+    tipo = classify_purchase(oggetto)
+    low = oggetto.lower()
+
+    if commessa and cliente:
+        scope = f" nell'ambito della commessa {commessa}, relativa al progetto/cliente {cliente}"
+    elif commessa:
+        scope = f" nell'ambito della commessa {commessa}"
+    elif cliente:
+        scope = f" nell'ambito delle attività previste per {cliente}"
+    else:
+        scope = ''
+
+    qtxt = f"n. {qty} " if qty else ''
+    if tipo == 'licenze':
+        action = 'rinnovare' if any(k in low for k in ['rinnovo','renew','subscription']) else 'acquisire'
+        bisogno = f"Necessità di {action} {qtxt}{item}{scope}, al fine di garantire la disponibilità delle licenze necessarie alle attività progettuali e la relativa continuità operativa."
+    elif tipo == 'servizi':
+        bisogno = f"Necessità di acquisire {item}{scope}, a supporto delle attività previste e della corretta esecuzione del progetto."
+        if qty:
+            bisogno += f" Il quantitativo richiesto ({qty}) corrisponde al fabbisogno indicato nella richiesta di acquisto."
+    else:
+        bisogno = f"Necessità di acquisire {qtxt}{item}{scope}."
+        if qty:
+            bisogno += " La quantità richiesta corrisponde al fabbisogno definito dal progetto e dalle specifiche tecniche della commessa."
+        else:
+            bisogno += " Il fabbisogno è quello indicato nella richiesta di acquisto e nella documentazione tecnica disponibile."
+
+    off_num = str(offer_data.get('offerta_numero') or '').strip()
+    off_date = str(offer_data.get('offerta_data') or '').strip()
+    supplier = str(d.get('fornitore') or '').strip()
+    total = float(d.get('totale') or 0)
+    if off_num:
+        ref = f"offerta {off_num}"
+        if off_date:
+            ref += f" del {off_date}"
+        if supplier:
+            ref += f" presentata da {supplier}"
+        prezzo = f"Il prezzo di riferimento è stato determinato sulla base dell'{ref}"
+        if total:
+            prezzo += f", per un importo complessivo pari a {fmt_eur(total)}"
+        prezzo += "."
+    elif total and supplier:
+        prezzo = f"Il prezzo di riferimento è quello risultante dalla documentazione economica del fornitore {supplier}, per un importo complessivo pari a {fmt_eur(total)}."
+    elif total:
+        prezzo = f"Il prezzo di riferimento risultante dalla documentazione disponibile è pari a {fmt_eur(total)}."
+    else:
+        prezzo = "Prezzo di riferimento da completare: nei documenti caricati non è stato individuato un valore economico sufficientemente affidabile."
+
+    return bisogno + "\n\n" + prezzo
+
 def decide(d):
     docs=['4','6']
     reasons=['Allegato 4: requisiti sicurezza/compliance','Allegato 6: trattamento dati']
@@ -252,8 +330,8 @@ def package(d,docs,offer_bytes=None,offer_name=None):
     return z.getvalue()
 
 
-st.set_page_config(page_title='Generatore RDA Olivetti v0.5',layout='wide')
-st.title('Generatore RDA Olivetti — v0.5')
+st.set_page_config(page_title='Generatore RDA Olivetti v0.5.1',layout='wide')
+st.title('Generatore RDA Olivetti — v0.5.1')
 st.caption('Carica Offerta + Richiesta RDA + riga Excel. L’app estrae i dati, te li fa verificare e poi genera gli allegati scelti.')
 
 st.subheader('1. Carica i documenti di partenza')
@@ -290,7 +368,7 @@ if offer_file or rda_file or excel_file:
         oggetto_default=detected.get('oggetto','')
         if rda_data.get('quantita') and oggetto_default: oggetto_default=f"n. {rda_data['quantita']} {oggetto_default}"
         oggetto=st.text_area('Oggetto',value=str(oggetto_default))
-        motivazione=st.text_area('Motivazione / descrizione esigenza',value='')
+        nota_razionale=st.text_area('Indicazioni aggiuntive per Allegato 7 (opzionale)',value='',help='Scrivi solo ciò che non emerge dai documenti: es. continuità, precedente acquisto, motivazione specifica.')
         riferimenti=st.text_input('Riferimenti (SDW/SH/PCD, se applicabile)')
         consegna=st.text_input('Consegna rilevata',value=str(detected.get('consegna','')))
 
@@ -338,7 +416,21 @@ if offer_file or rda_file or excel_file:
         st.write('**Proposta automatica:** '+', '.join(docs))
         for reason in reasons: st.caption('• '+reason)
 
-    st.subheader('4. Controllo finale')
+    # Allegato 7: razionale automatico, sempre verificabile e modificabile
+    base_for_7=dict(rda=rda,fornitore=fornitore,sap=sap,piva=piva,totale=totale,data=data,commessa=commessa,
+                    cliente=cliente,richiedente=richiedente,funzione=funzione,oggetto=oggetto)
+    auto_razionale = generate_all7_rationale(base_for_7, offer_data, rda_data)
+    if nota_razionale.strip():
+        parts = auto_razionale.split('\n\n',1)
+        auto_razionale = parts[0] + ' ' + nota_razionale.strip() + ('\n\n' + parts[1] if len(parts)>1 else '')
+    if '7' in docs:
+        st.subheader('4. Razionale Allegato 7')
+        st.caption('Bozza generata da Offerta + Richiesta RDA + riga Excel. Controllala e modificala liberamente prima di generare.')
+        motivazione=st.text_area('Testo Allegato 7',value=auto_razionale,height=190)
+    else:
+        motivazione=auto_razionale
+
+    st.subheader('5. Controllo finale')
     missing=[]
     for label,val in [('N. RDA',rda),('Fornitore',fornitore),('Oggetto',oggetto)]:
         if not val: missing.append(label)
