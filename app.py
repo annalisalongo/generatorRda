@@ -38,8 +38,8 @@ def decide(d):
         docs.append('7'); reasons.append('Allegato 7: razionali fabbisogno/prezzo')
     if d['deroga'] or d['side_letter']:
         docs.append('OFFERTA'); reasons.append('Offerta: acquisto in deroga o gruppo merce Side Letter')
-    if d['trattativa_diretta'] and d['totale']>20000 and not d['acquisto_speciale'] and not d['infragruppo'] and not d['accordo_esistente']:
-        docs.append('3A'); reasons.append('Allegato 3A: TD >20k e nessuna esclusione dichiarata')
+    if d['totale'] > 20000:
+        docs.append('3A'); reasons.append('Allegato 3A: importo RDA superiore a € 20.000 (regola operativa Olivetti)')
     if d['gara_prest_prof']:
         docs.append('13'); reasons.append('Allegato 13: gara per prestazioni professionali')
     if d['saas']:
@@ -55,7 +55,7 @@ def decide(d):
     if d['attestazione_conformita']:
         docs.append('16'); reasons.append('Allegato 16: attestazione conformità privacy')
     if d['acquisto_speciale']:
-        warnings.append('Acquisto Speciale selezionato: non genera 3A automaticamente; si applica per il resto il processo standard.')
+        warnings.append('Acquisto Speciale selezionato: il 3A resta incluso se l’importo RDA supera € 20.000, secondo la regola operativa impostata.')
     if d['trattativa_diretta'] and not d['casistica_td'] and not d['acquisto_speciale']:
         warnings.append('Selezionare la casistica di Trattativa Diretta (Allegato 1).')
     return list(dict.fromkeys(docs)), reasons, warnings
@@ -210,22 +210,16 @@ if trattativa_diretta and not acquisto_speciale:
 if acquisto_speciale:
     st.selectbox('Casistica Acquisto Speciale — Allegato 2',['']+SPECIALI)
 
-# Sezione 3A sempre visibile nel flusso quando la pratica è una TD.
-# Il motore mostra anche il motivo per cui il documento sarà o non sarà generato.
+# Sezione 3A: secondo la regola operativa Olivetti impostata nel generatore,
+# ogni RDA con importo > € 20.000 richiede l'Allegato 3A.
 st.subheader('Allegato 3A — verifica e compilazione')
-three_a_eligible = trattativa_diretta and totale>20000 and not acquisto_speciale and not infragruppo and not accordo_esistente
-if not trattativa_diretta:
-    st.info('Allegato 3A: NO — la pratica non è stata indicata come Trattativa Diretta.')
-elif totale<=20000:
-    st.info('Allegato 3A: NO — importo non superiore a € 20.000.')
-elif acquisto_speciale:
-    st.info('Allegato 3A: NO — è stato selezionato Acquisto Speciale.')
-elif infragruppo:
-    st.info('Allegato 3A: NO — è stato selezionato Acquisto infragruppo.')
-elif accordo_esistente:
-    st.info('Allegato 3A: NO — è stato indicato un contratto/AQ/listino già in essere.')
+three_a_eligible = totale > 20000
+if totale <= 20000:
+    st.info('Allegato 3A: NO — importo RDA non superiore a € 20.000.')
 else:
-    st.success('Allegato 3A: SÌ — verrà inserito nel pacchetto e precompilato con i dati sottostanti.')
+    st.success('Allegato 3A: SÌ — importo RDA superiore a € 20.000. Verrà inserito nel pacchetto e precompilato.')
+    if not trattativa_diretta:
+        st.caption('Il 3A viene richiesto dalla regola operativa >20k anche se la pratica non è stata marcata come Trattativa Diretta.')
 
 importo_cumulato=0.0; tipo_td=''; ultimo_contratto=''; data_inizio=''; data_fine=''; pluriennale=''
 descrizione_3a=''; acquisto_tecnologia=''; tecnologia=''; vincolo_tecnologico=''; rischi_altro_fornitore=''
