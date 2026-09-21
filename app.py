@@ -366,21 +366,61 @@ def make7(d,out):
     xml_replace(T/'allegato7.docx',out,repl,black_replacements=black)
 
 
+def _replace_text_preserve_runs(paragraph, old, new, occurrence=1):
+    """Sostituisce testo in un paragrafo senza ricreare i run e senza perdere la formattazione."""
+    full = ''.join(r.text for r in paragraph.runs)
+    pos = -1
+    cursor = 0
+    for _ in range(occurrence):
+        pos = full.find(old, cursor)
+        if pos < 0:
+            return False
+        cursor = pos + len(old)
+    end = pos + len(old)
+
+    spans=[]
+    cur=0
+    for i,r in enumerate(paragraph.runs):
+        nxt=cur+len(r.text)
+        spans.append((i,cur,nxt))
+        cur=nxt
+
+    touched=[x for x in spans if x[1] < end and x[2] > pos]
+    if not touched:
+        return False
+    first_i=touched[0][0]
+    first_start=touched[0][1]
+    last_i=touched[-1][0]
+    last_end=touched[-1][2]
+    prefix=paragraph.runs[first_i].text[:max(0,pos-first_start)]
+    suffix=paragraph.runs[last_i].text[max(0,end-spans[last_i][1]):]
+    paragraph.runs[first_i].text = prefix + new + (suffix if first_i==last_i else '')
+    for i,_,_ in touched[1:]:
+        paragraph.runs[i].text=''
+    if first_i != last_i:
+        paragraph.runs[last_i].text=suffix
+    return True
+
+
 def make6(d,out):
-    # Prima conserva il layout originale e sostituisce i campi semplici.
+    # Conserva il layout e la formattazione del modello originale.
     repl={'2101416996': d.get('rda','')}
     xml_replace(T/'allegato6.docx',out,repl)
 
-    # Alcuni campi del modello sono spezzati su più run Word: li compiliamo
-    # a livello di paragrafo per evitare che restino placeholder nel documento.
     doc=Document(out)
     for p in doc.paragraphs:
-        txt=p.text.strip()
-        if txt.startswith('Riferimenti (*):') and 'Fornitore:' in txt:
-            p.text=f"Riferimenti (*): {d.get('riferimenti','')}\tFornitore: {d.get('fornitore','')}"
-        elif txt.startswith('1° Riporto'):
-            right = txt[len('1° Riporto'):].lstrip('\t ')
-            p.text='Paolo Sigismondi - 1° Riporto' + (('\t' + right) if right else '')
+        if p.text.startswith('Riferimenti (*):') and 'Fornitore:' in p.text:
+            _replace_text_preserve_runs(p, 'Scrivere qui', d.get('riferimenti',''), 1)
+            _replace_text_preserve_runs(p, 'Scrivere qui', d.get('fornitore',''), 1)
+        elif p.text.startswith('1° Riporto'):
+            # Modifica soltanto la descrizione a destra, lasciando intatti
+            # font, dimensione, tabulazione e stile della riga originale.
+            _replace_text_preserve_runs(
+                p,
+                'Responsabile primo riporto di PR',
+                'Paolo Sigismondi - 1° Riporto',
+                1
+            )
     doc.save(out)
 
 
@@ -587,4 +627,4 @@ if offer_file or rda_file or excel_paste.strip():
         z=package(d,docs,offer_file.getvalue() if offer_file else None,offer_file.name if offer_file else None)
         st.download_button('Scarica ZIP RDA',z,file_name=f"RDA_{rda}_allegati.zip",mime='application/zip')
 else:
-    st.info('Carica almeno un documento oppure incolla una riga Excel. Flusso consigliato: Offerta + Richiesta RDA + riga copiata dalla Bibbia.')
+    st.info('Carica almeno un documento oppure incolla una riga Excel. Flusso consigliato: Offerta + Richiesta RDA + riga copiata dal'excell.')
