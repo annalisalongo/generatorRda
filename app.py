@@ -33,13 +33,38 @@ SPECIALI = [
 
 
 def euro(s):
-    if isinstance(s, (int,float)): return float(s)
-    s = str(s or '').strip().replace('EUR','').replace('€','').replace('\xa0','').replace(' ','')
-    if not s: return 0.0
-    if ',' in s:
-        s = s.replace('.','').replace(',','.')
-    try: return float(s)
-    except: return 0.0
+    """Converte importi italiani/Excel senza confondere migliaia e decimali.
+
+    Esempi: 6.400 -> 6400; 6.400,00 -> 6400; 6400,00 -> 6400;
+    1.042,96 -> 1042.96. Accetta anche 6400.00 quando il punto e' chiaramente decimale.
+    """
+    if isinstance(s, (int, float)):
+        return float(s)
+    raw = str(s or '').strip().replace('EUR', '').replace('€', '').replace('\xa0', '').replace(' ', '')
+    if not raw:
+        return 0.0
+    raw = re.sub(r'[^0-9,.-]', '', raw)
+    if not raw or raw in {'-', '.', ','}:
+        return 0.0
+
+    # Formato italiano completo: 1.234,56
+    if ',' in raw:
+        normalized = raw.replace('.', '').replace(',', '.')
+    elif '.' in raw:
+        parts = raw.split('.')
+        # Uno o piu' gruppi da 3 cifre dopo il punto => separatore delle migliaia.
+        # 6.400 -> 6400; 1.234.567 -> 1234567
+        if len(parts) > 1 and all(len(x) == 3 for x in parts[1:]) and parts[0].lstrip('-').isdigit():
+            normalized = ''.join(parts)
+        else:
+            # Es. 6400.00 / 1042.96: punto decimale.
+            normalized = raw
+    else:
+        normalized = raw
+    try:
+        return float(normalized)
+    except ValueError:
+        return 0.0
 
 
 def fmt_eur(x):
@@ -179,8 +204,10 @@ def merge_detected(offer, rda, xls):
     for src in (offer, rda, xls):
         for k,v in src.items():
             if v not in ('',None,0,0.0): d[k]=v
-    # eccezioni utili
+    # Eccezioni utili. La Bibbia Excel e' la fonte gestionale autorevole per il Totale:
+    # evita che un prezzo trovato nell'offerta sovrascriva il totale RDA indicato nella riga.
     if offer.get('totale'): d['totale'] = offer['totale']
+    if xls.get('totale') not in ('', None, 0, 0.0): d['totale'] = xls['totale']
     if offer.get('fornitore'): d['fornitore'] = offer['fornitore']
     if rda.get('data'): d['data'] = rda['data']
     if xls.get('rda'): d['rda'] = xls['rda']
@@ -503,36 +530,24 @@ def attachment_filename(rda, code, ext):
     return f"RDA {rda} {title}.{ext}"
 
 def _to_pdf(src: Path, out_dir: Path):
-    """Converte DOCX/XLSX in PDF. Prima prova LibreOffice; su macOS prova anche Microsoft Word."""
+    """Converte DOCX/XLSX in PDF sul server Streamlit tramite LibreOffice headless."""
     out_dir.mkdir(parents=True, exist_ok=True)
     expected = out_dir / f"{src.stem}.pdf"
 
+    # Streamlit Community Cloud esegue l'app su Linux: LibreOffice viene
+    # installato dal file packages.txt presente nella root del repository.
     office = shutil.which('libreoffice') or shutil.which('soffice')
-    if office:
-        try:
-            subprocess.run(
-                [office, '--headless', '--convert-to', 'pdf', '--outdir', str(out_dir), str(src)],
-                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90
-            )
-            if expected.exists():
-                return expected
-        except Exception:
-            pass
+    if not office:
+        return None
 
-    # Fallback per Mac con Microsoft Word installato (solo DOCX).
-    if platform.system() == 'Darwin' and src.suffix.lower() == '.docx' and shutil.which('osascript'):
-        script = f'''tell application "Microsoft Word"
-set d to open POSIX file "{str(src).replace('\\','\\\\').replace('\"','\\\"')}"
-save as d file name (POSIX file "{str(expected).replace('\\','\\\\').replace('\"','\\\"')}") file format format PDF
-close d saving no
-end tell'''
-        try:
-            subprocess.run(['osascript', '-e', script], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
-            if expected.exists():
-                return expected
-        except Exception:
-            pass
-    return None
+    try:
+        subprocess.run(
+            [office, '--headless', '--convert-to', 'pdf', '--outdir', str(out_dir), str(src)],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120
+        )
+        return expected if expected.exists() else None
+    except Exception:
+        return None
 
 
 def package(d,docs,offer_bytes=None,offer_name=None):
@@ -578,7 +593,7 @@ def package(d,docs,offer_bytes=None,offer_name=None):
         note=td/'AVVISO_CONVERSIONE_PDF.txt'
         note.write_text(
             'Non è stato possibile creare il PDF per:\n- ' + '\n- '.join(conversion_failed) +
-            '\n\nInstalla LibreOffice sul computer che esegue l’app oppure, su macOS, verifica che Microsoft Word sia installato e autorizzato all’automazione.',
+            '\n\nConversione PDF non disponibile sul server. Verifica che packages.txt sia presente nella root del repository Streamlit e contenga libreoffice. Dopo averlo aggiunto, riavvia/redeploya l’app.',
             encoding='utf-8'
         )
         produced.append(note)
@@ -589,8 +604,8 @@ def package(d,docs,offer_bytes=None,offer_name=None):
     return z.getvalue()
 
 
-st.set_page_config(page_title='Generatore RDA Olivetti v0.5.8',layout='wide')
-st.title('Generatore RDA Olivetti — v0.5.8')
+st.set_page_config(page_title='Generatore RDA Olivetti v0.6.0',layout='wide')
+st.title('Generatore RDA Olivetti — v0.6.0')
 st.caption('Carica Offerta + Richiesta RDA e incolla una riga copiata dalla Bibbia Excel. Lo ZIP finale contiene gli allegati sia nel formato originale sia in PDF.')
 
 st.subheader('1. Documenti e riga della Bibbia Excel')
