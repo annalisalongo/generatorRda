@@ -153,6 +153,14 @@ def parse_pasted_excel_row(text):
         headers = headers15 if len(vals) >= 15 else headers14
     # Non comprimere celle vuote: la posizione delle colonne è significativa.
     raw = {str(headers[i]).strip(): vals[i].strip() if i < len(vals) else '' for i in range(min(len(headers), len(vals)))}
+
+    # Nella Bibbia RDA le ultime due colonne sono SEMPRE Totale e OGGETTO.
+    # Le ancoriamo anche da destra: così una colonna intermedia aggiunta/omessa non può
+    # spostare il Totale e farci leggere un altro numero (es. 6,40 invece di 6.400,00).
+    if len(vals) >= 2:
+        raw['Totale'] = vals[-2].strip()
+        raw['OGGETTO'] = vals[-1].strip()
+
     extras = vals[len(headers):] if len(vals) > len(headers) else []
     return raw, extras
 
@@ -171,6 +179,7 @@ def pasted_row_map(raw):
         elif 'ragione' in lk or (lk == 'fornitore'):
             out['fornitore'] = sv
         elif 'totale' in lk:
+            out['totale_raw'] = sv
             out['totale'] = euro(sv)
         elif 'commessa' in lk:
             out['commessa'] = sv
@@ -631,6 +640,8 @@ if offer_file or rda_file or excel_paste.strip():
         sap=st.text_input('Codice SAP fornitore',value=str(detected.get('sap','')))
         piva=st.text_input('P.IVA fornitore',value=str(detected.get('piva','')))
         totale=euro(st.text_input('Totale RDA / Offerta',value=fmt_eur(detected.get('totale',0)).replace('€ ','')))
+        if xls_data.get('totale_raw'):
+            st.caption(f"Totale letto dalla Bibbia: {xls_data['totale_raw']} → {fmt_eur(xls_data.get('totale',0))}")
     with c2:
         data=st.text_input('Data richiesta',value=str(detected.get('data','')))
         commessa=st.text_input('Commessa',value=str(detected.get('commessa','')))
