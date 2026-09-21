@@ -1,6 +1,5 @@
 from pathlib import Path
 import io, re, shutil, tempfile, zipfile
-from lxml import etree
 import streamlit as st
 from docx import Document
 
@@ -61,53 +60,33 @@ def decide(d):
         warnings.append('Selezionare la casistica di Trattativa Diretta (Allegato 1).')
     return list(dict.fromkeys(docs)), reasons, warnings
 
-def xml_replace(src, dst, repls, occurrence_repls=None):
-    """Sostituisce testo nei nodi Word w:t senza manipolare XML come stringa.
-
-    Questo evita DOCX corrotti quando i valori contengono &, <, >, apostrofi,
-    accenti o altri caratteri che in XML devono essere escapati.
-    """
-    occurrence_repls = occurrence_repls or []
-    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-    occurrence_count = {}
-
-    with zipfile.ZipFile(src, 'r') as zin, zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zout:
+def xml_replace(src,dst,repls,occurrence_repls=None):
+    """Sostituzione sicura nei nodi di testo OOXML: non corrompe il DOCX con &, <, >, accenti."""
+    from lxml import etree
+    occurrence_repls=occurrence_repls or []
+    counts={}
+    with zipfile.ZipFile(src,'r') as zin, zipfile.ZipFile(dst,'w',zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
-            data = zin.read(item.filename)
-
-            # Modifichiamo solo i file XML di Word, tramite parser XML vero.
-            if item.filename.startswith('word/') and item.filename.endswith('.xml'):
+            data=zin.read(item.filename)
+            if item.filename.endswith('.xml'):
                 try:
-                    root = etree.fromstring(data)
-                    nodes = root.xpath('//w:t', namespaces=ns)
-
-                    for node in nodes:
-                        if node.text is None:
-                            continue
-
-                        # Sostituzioni normali, limitate al contenuto dei nodi di testo.
-                        for old, new in repls.items():
-                            if old in node.text:
-                                node.text = node.text.replace(old, str(new))
-
-                        # Sostituzioni per N-esima occorrenza, se presenti nel template.
-                        for old, new, wanted_n in occurrence_repls:
-                            if old in node.text:
-                                occurrence_count[old] = occurrence_count.get(old, 0) + 1
-                                if occurrence_count[old] == wanted_n:
-                                    node.text = node.text.replace(old, str(new), 1)
-
-                    data = etree.tostring(
-                        root,
-                        xml_declaration=True,
-                        encoding='UTF-8',
-                        standalone=True
-                    )
-                except etree.XMLSyntaxError:
-                    # Se un XML accessorio non è parsabile, lo copiamo intatto.
+                    root=etree.fromstring(data)
+                    for node in root.xpath('//*[local-name()="t"]'):
+                        if node.text is None: continue
+                        text=node.text
+                        for a,b in repls.items():
+                            if a in text:
+                                text=text.replace(a,str(b))
+                        for old,new,n in occurrence_repls:
+                            if old in text:
+                                counts[old]=counts.get(old,0)+1
+                                if counts[old]==n:
+                                    text=text.replace(old,str(new),1)
+                        node.text=text
+                    data=etree.tostring(root,xml_declaration=True,encoding='UTF-8',standalone=True)
+                except Exception:
                     pass
-
-            zout.writestr(item, data)
+            zout.writestr(item,data)
 
 def make7(d,out):
     repl={
@@ -126,13 +105,40 @@ def make6(d,out):
     xml_replace(T/'allegato6.docx',out,repl,occ)
 
 def make3a(d,out):
-    repl={
-      'Scrivere qui il nome del fornitore':d['fornitore'], '00000':d['sap'], '00000000000':d['piva'],
-      '€ 000.000.000,00':fmt_eur(d['totale']), '0000000000':d['rda'],
-      'Scegliere un elemento.': d['casistica_td'] or 'DA COMPILARE',
-      'Scrivere qui la risposta':d['motivazione'], 'Scrivere qui il cliente':d['cliente']
-    }
-    xml_replace(T/'allegato3.docx',out,repl)
+    # Lavora sul DOCX originale: niente sostituzioni globali di numeri/placeholder.
+    shutil.copy2(T/'allegato3.docx',out)
+    doc=Document(out)
+    # Data del solo 3A (non altera i placeholder del 3B).
+    for p in doc.paragraphs:
+        if p.text.strip()=='Luogo, gg/mm/aaaa':
+            p.text='Luogo Roma, '+d.get('data','')
+            break
+    t=doc.tables[1]
+    t.cell(2,0).text='Fornitore proposto:\n'+d.get('fornitore','')
+    t.cell(2,1).text='Cod. Sap: '+d.get('sap','')
+    t.cell(2,3).text='P.IVA: '+d.get('piva','')
+    t.cell(3,0).text='Importo TD: '+fmt_eur(d.get('totale',0))
+    if d.get('importo_cumulato'):
+        t.cell(3,1).text='Importo cumulato dei BO/contratti comprensivo della TD in oggetto:\n'+fmt_eur(d['importo_cumulato'])
+    t.cell(3,3).text='N° RDA (se emessa): '+d.get('rda','')
+    if d.get('tipo_td'): t.cell(4,0).text='La richiesta di Trattativa Diretta è per: '+d['tipo_td']
+    if d.get('ultimo_contratto'): t.cell(4,1).text='Numero ultimo contratto/BO di riferimento:\nN.°: '+d['ultimo_contratto']
+    if d.get('data_inizio') or d.get('data_fine'): t.cell(4,3).text=f"Periodo fornitura:\ninizio: {d.get('data_inizio','')}    fine: {d.get('data_fine','')}"
+    if d.get('pluriennale'): t.cell(5,0).text='Attività pluriennale (progetto di durata superiore ad 1 anno): '+d['pluriennale']
+    if d.get('casistica_td'): t.cell(6,0).text="Valorizzare il campo con una delle casistiche dell’allegato 1: "+d['casistica_td']
+    if d.get('descrizione_3a'): t.cell(7,0).text='Descrizione chiara, dettagliata e circostanziata dell’oggetto della richiesta, con indicazione dei tempi di realizzazione:\n'+d['descrizione_3a']
+    if d.get('acquisto_tecnologia'): t.cell(8,0).text='Acquisto di tecnologia: '+d['acquisto_tecnologia']
+    if d.get('tecnologia'): t.cell(8,2).text='Indicare la tecnologia:\n'+d['tecnologia']
+    if d.get('vincolo_tecnologico'): t.cell(9,0).text='Vincolo tecnologico / legame fornitore-cliente-vendor:\n'+d['vincolo_tecnologico']
+    if d.get('rischi_altro_fornitore'): t.cell(10,0).text='Rischi derivanti dall’affidamento a fornitore diverso da quello proposto:\n'+d['rischi_altro_fornitore']
+    if d.get('legacy'): t.cell(11,0).text='Continuità tecnologica / grado di legacy e tempi per avvio processo competitivo:\n'+d['legacy']
+    if d.get('continuita'): t.cell(12,0).text='La richiesta è relativa ad attività in continuità con lo stesso fornitore? '+d['continuita']
+    if d.get('fornitore_impegnato'): t.cell(13,0).text='Fornitore è già impegnato? '+d['fornitore_impegnato']
+    if d.get('stato_fornitura'): t.cell(14,0).text='Stato della fornitura: '+d['stato_fornitura']
+    if d.get('motivazione_sanatoria'): t.cell(15,0).text='Motivazione esclusione Atto a Sanatoria:\n'+d['motivazione_sanatoria']
+    if d.get('documenti_allegati'): t.cell(16,0).text='Elenco documenti allegati:\n'+d['documenti_allegati']
+    if d.get('cliente'): t.cell(17,0).text='Cliente destinatario della fornitura: '+d['cliente']
+    doc.save(out)
 
 def package(d,docs,offer_bytes=None,offer_name=None):
     td=Path(tempfile.mkdtemp())
@@ -156,8 +162,8 @@ def package(d,docs,offer_bytes=None,offer_name=None):
         for p in produced: zz.write(p,p.name)
     return z.getvalue()
 
-st.set_page_config(page_title='Generatore RDA Olivetti v0.4',layout='wide')
-st.title('Generatore RDA Olivetti — v0.4')
+st.set_page_config(page_title='Generatore RDA Olivetti v0.4.2',layout='wide')
+st.title('Generatore RDA Olivetti — v0.4.2')
 st.caption('Nuova procedura: motore decisionale + compilazione sui DOCX originali. I campi non supportati non vengono inventati.')
 
 c1,c2,c3=st.columns(3)
@@ -203,6 +209,48 @@ if trattativa_diretta and not acquisto_speciale:
     casistica_td=st.selectbox('Casistica Trattativa Diretta — Allegato 1',['']+CASI_TD)
 if acquisto_speciale:
     st.selectbox('Casistica Acquisto Speciale — Allegato 2',['']+SPECIALI)
+
+# Sezione 3A sempre visibile nel flusso quando la pratica è una TD.
+# Il motore mostra anche il motivo per cui il documento sarà o non sarà generato.
+st.subheader('Allegato 3A — verifica e compilazione')
+three_a_eligible = trattativa_diretta and totale>20000 and not acquisto_speciale and not infragruppo and not accordo_esistente
+if not trattativa_diretta:
+    st.info('Allegato 3A: NO — la pratica non è stata indicata come Trattativa Diretta.')
+elif totale<=20000:
+    st.info('Allegato 3A: NO — importo non superiore a € 20.000.')
+elif acquisto_speciale:
+    st.info('Allegato 3A: NO — è stato selezionato Acquisto Speciale.')
+elif infragruppo:
+    st.info('Allegato 3A: NO — è stato selezionato Acquisto infragruppo.')
+elif accordo_esistente:
+    st.info('Allegato 3A: NO — è stato indicato un contratto/AQ/listino già in essere.')
+else:
+    st.success('Allegato 3A: SÌ — verrà inserito nel pacchetto e precompilato con i dati sottostanti.')
+
+importo_cumulato=0.0; tipo_td=''; ultimo_contratto=''; data_inizio=''; data_fine=''; pluriennale=''
+descrizione_3a=''; acquisto_tecnologia=''; tecnologia=''; vincolo_tecnologico=''; rischi_altro_fornitore=''
+legacy=''; continuita=''; fornitore_impegnato=''; stato_fornitura=''; motivazione_sanatoria=''; documenti_allegati=''
+if three_a_eligible:
+    x1,x2=st.columns(2)
+    with x1:
+        importo_cumulato=euro(st.text_input('3A — Importo cumulato BO/contratti comprensivo TD','0,00'))
+        tipo_td=st.selectbox('3A — La richiesta di TD è per',['','Nuova fornitura','Rinnovo','Estensione/variante','Altro'])
+        ultimo_contratto=st.text_input('3A — Numero ultimo contratto/BO di riferimento')
+        data_inizio=st.text_input('3A — Inizio fornitura (gg/mm/aaaa)')
+        data_fine=st.text_input('3A — Fine fornitura (gg/mm/aaaa)')
+        pluriennale=st.selectbox('3A — Attività pluriennale',['','No','Sì'])
+        acquisto_tecnologia=st.selectbox('3A — Acquisto di tecnologia',['','No','Sì'])
+        tecnologia=st.text_input('3A — Tecnologia, se applicabile')
+    with x2:
+        descrizione_3a=st.text_area('3A — Descrizione dettagliata',value=motivazione)
+        vincolo_tecnologico=st.text_area('3A — Vincolo tecnologico / vendor, se applicabile')
+        rischi_altro_fornitore=st.text_area('3A — Rischi con un fornitore diverso')
+        legacy=st.text_area('3A — Legacy / continuità tecnologica, se applicabile')
+        continuita=st.selectbox('3A — Continuità con lo stesso fornitore',['','No','Sì'])
+        fornitore_impegnato=st.selectbox('3A — Fornitore già impegnato',['','No','Sì'])
+        stato_fornitura=st.selectbox('3A — Stato fornitura',['','Non avviata','In corso','Completata'])
+        motivazione_sanatoria=st.text_area('3A — Motivazione esclusione Atto a Sanatoria, se applicabile')
+        documenti_allegati=st.text_area('3A — Elenco documenti allegati')
 
 d=locals().copy()
 docs,reasons,warnings=decide(d)
