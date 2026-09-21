@@ -1,70 +1,182 @@
 from pathlib import Path
 import io, re, shutil, tempfile, zipfile
+from datetime import datetime
 import streamlit as st
 from docx import Document
+from pypdf import PdfReader
+from openpyxl import load_workbook
 
-BASE=Path(__file__).parent
-T=BASE/'templates'
+BASE = Path(__file__).parent
+T = BASE / 'templates'
 
-CASI_TD=[
+ALL_DOCS = ['1','2','3A','4','6','7','10','11','12','13','14','15','16','OFFERTA']
+
+CASI_TD = [
 '1 - Particolarità tecnologiche/infrastrutturali / continuità',
-'2 - Emergenza adeguatamente motivata','3 - Consulenze/prestazioni professionali specialistiche o complementari',
-'4 - Acquisto di opportunità','5 - Gara andata deserta','6 - Prezzi imposti / cessione azienda / impossibilità oggettiva di competizione',
-'7 - Estensione condizioni/prezzi di competizione','8 - Progetto business/tecnologico identificato con fabbisogni e fornitori puntuali',
-'9 - Commercializzazione prodotti/soluzioni non standard a clienti privati','10 - Opportunità business per commercializzazione verso PA']
+'2 - Emergenza adeguatamente motivata',
+'3 - Consulenze/prestazioni professionali specialistiche o complementari',
+'4 - Acquisto di opportunità','5 - Gara andata deserta',
+'6 - Prezzi imposti / cessione azienda / impossibilità oggettiva di competizione',
+'7 - Estensione condizioni/prezzi di competizione',
+'8 - Progetto business/tecnologico identificato con fabbisogni e fornitori puntuali',
+'9 - Commercializzazione prodotti/soluzioni non standard a clienti privati',
+'10 - Opportunità business per commercializzazione verso PA']
 
-SPECIALI=[
-'1 - Scelte tecnologiche/business di Gruppo da unico fornitore','2 - Diritti/sponsorizzazioni/collaboratori artistici unici',
-'3 - Manutenzione applicativi proprietari / rete non TPM','4 - Partnership commerciali','5 - Canali del Costruttore certificati / prezzi Procurement',
-'6 - Vendor tecnologico/distributore per gare PA con tecnologia esplicita ed esclusività','7 - Nuove tecnologie / primo impiego / sperimentazioni',
-'8 - Postazioni alta frequenza','9 - Prodotti di rete per ampliamento reti esistenti','10 - Adesione ad Accordi Quadro di Gruppo',
+SPECIALI = [
+'1 - Scelte tecnologiche/business di Gruppo da unico fornitore',
+'2 - Diritti/sponsorizzazioni/collaboratori artistici unici',
+'3 - Manutenzione applicativi proprietari / rete non TPM','4 - Partnership commerciali',
+'5 - Canali del Costruttore certificati / prezzi Procurement',
+'6 - Vendor tecnologico/distributore per gare PA con tecnologia esplicita ed esclusività',
+'7 - Nuove tecnologie / primo impiego / sperimentazioni','8 - Postazioni alta frequenza',
+'9 - Prodotti di rete per ampliamento reti esistenti','10 - Adesione ad Accordi Quadro di Gruppo',
 '11 - Networking ICT con accordi/listini PR >=80% commessa','12 - Leasing individuato da Enterprise/CF.F']
 
+
 def euro(s):
-    if isinstance(s,(int,float)): return float(s)
-    s=str(s).strip().replace('€','').replace(' ','')
-    if ',' in s: s=s.replace('.','').replace(',','.')
-    return float(s or 0)
+    if isinstance(s, (int,float)): return float(s)
+    s = str(s or '').strip().replace('EUR','').replace('€','').replace('\xa0','').replace(' ','')
+    if not s: return 0.0
+    if ',' in s:
+        s = s.replace('.','').replace(',','.')
+    try: return float(s)
+    except: return 0.0
+
 
 def fmt_eur(x):
-    return f"€ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X','.')
+    return f"€ {float(x):,.2f}".replace(',', 'X').replace('.', ',').replace('X','.')
+
+
+def pdf_text(upload):
+    if not upload: return ''
+    try:
+        reader = PdfReader(io.BytesIO(upload.getvalue()))
+        return '\n'.join((p.extract_text() or '') for p in reader.pages)
+    except Exception as e:
+        st.warning(f'Non riesco a leggere automaticamente {upload.name}: {e}')
+        return ''
+
+
+def first(patterns, text, flags=re.I|re.S):
+    for pat in patterns:
+        m = re.search(pat, text, flags)
+        if m:
+            return re.sub(r'\s+', ' ', m.group(1)).strip(' :-\n\t')
+    return ''
+
+
+def normalize_date(s):
+    s = (s or '').strip()
+    for fmt in ('%d/%m/%Y','%d-%m-%Y','%d.%m.%Y','%d %B %Y','%d %b %Y'):
+        try: return datetime.strptime(s,fmt).strftime('%d/%m/%Y')
+        except: pass
+    # English month names from supplier quotations
+    for fmt in ('%d %B %Y','%d %b %Y'):
+        try: return datetime.strptime(s,fmt).strftime('%d/%m/%Y')
+        except: pass
+    return s
+
+
+def extract_offer(text):
+    d = {}
+    d['offerta_numero'] = first([r'(?:Numero offerta|RIFERIMENTO OFFERTA)\s*[:\-]?\s*([A-Z0-9_./-]+)'], text)
+    d['offerta_data'] = normalize_date(first([r'\b(\d{1,2}\s+[A-Za-z]+\s+20\d{2})\b', r'\b(\d{1,2}/\d{1,2}/20\d{2})\b'], text))
+    d['fornitore'] = first([r'OFFERTA\s*\n\s*([^\n]+?)(?=\n)', r'\n([A-Z][A-Z0-9 .&\'-]{3,})\s*\n[^\n]*(?:Belgium|Italia|Italy)'], text)
+    d['piva'] = first([r'\b(IT\d{11})\b'], text)
+    d['oggetto'] = first([r'Nome scheda\s+([^\n]+)', r'Servizio\s+([^\n]+)'], text)
+    d['progetto'] = first([r'Riferimento progetto\s+([^\n]+)'], text)
+    d['richiedente'] = first([r'Riferimento d.acquisto\s+([^\n]+)'], text)
+    d['totale'] = euro(first([r'PREZZO LORDO\s*(?:EUR|€)?\s*([\d.,]+)', r'PREZZO NETTO\s*(?:EUR|€)?\s*([\d.,]+)'], text))
+    d['consegna'] = first([r'TEMPO DI CONSEGNA\s*([0-9]+\s*(?:WD|giorni[^\n]*))'], text)
+    return d
+
+
+def extract_rda(text):
+    d = {}
+    d['data'] = normalize_date(first([r'Data Richiesta\s+Numero Commessa\s+(\d{1,2}/\d{1,2}/20\d{2})', r'Data Richiesta\s+(\d{1,2}/\d{1,2}/20\d{2})'], text))
+    d['commessa'] = first([r'Data Richiesta\s+Numero Commessa\s+\d{1,2}/\d{1,2}/20\d{2}\s+([^\n]+)', r'Numero Commessa\s+([^\n]+)'], text)
+    d['richiedente'] = first([r'Richiedente.*?\n\s*([^\n]+?)\s*\nRiferimento', r'Richiedente\s+Destinazione merce.*?\n\s*([^\n]+)'], text)
+    d['offerta_ref'] = first([r'(Offerta\s+[A-Z0-9_./-]+\s+del\s+\d{1,2}/\d{1,2}/20\d{2})'], text)
+    # Riga acquisto: posizione, quantità, fornitore, descrizione, costo. Heuristics + fallback.
+    m = re.search(r'\n\s*1\s+(\d+)\s+([^\n]+?)\s+([A-Za-z0-9_./-]{4,})\s+([\d.,]+)\s*(?:\n|$)', text)
+    if m:
+        d['quantita'] = m.group(1); d['fornitore'] = m.group(2).strip(); d['oggetto'] = m.group(3); d['totale'] = euro(m.group(4))
+    else:
+        d['oggetto'] = first([r'\b(HW_[A-Za-z0-9_./-]+)\b'], text)
+        d['totale'] = euro(first([r'\b(\d{3,}[.,]?\d*)\s*\n2\s*\n3\s*\n4'], text))
+    return d
+
+
+def extract_excel(upload, row_number=None):
+    if not upload: return {}, []
+    try:
+        wb = load_workbook(io.BytesIO(upload.getvalue()), data_only=True, read_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows: return {}, []
+        headers = [str(x or '').strip() for x in rows[0]]
+        data_rows = rows[1:]
+        if not data_rows: return {}, headers
+        idx = max(0, min((row_number or 2)-2, len(data_rows)-1))
+        vals = data_rows[idx]
+        raw = {headers[i]: vals[i] for i in range(min(len(headers),len(vals))) if headers[i]}
+        return raw, headers
+    except Exception as e:
+        st.warning(f'Non riesco a leggere il file Excel: {e}')
+        return {}, []
+
+
+def excel_map(raw):
+    out = {}
+    for k,v in raw.items():
+        lk = k.lower()
+        if 'rda' in lk and ('n.' in lk or 'numero' in lk or lk.strip()=='n. rda'): out['rda'] = str(v or '').strip()
+        elif 'sap' in lk and 'forn' in lk: out['sap'] = str(v or '').strip()
+        elif 'ragione' in lk or ('fornitore' in lk and 'cod' not in lk): out['fornitore'] = str(v or '').strip()
+        elif 'totale' in lk: out['totale'] = euro(v)
+        elif 'commessa' in lk: out['commessa'] = str(v or '').strip()
+        elif 'cliente' in lk or 'gara' in lk: out['cliente'] = str(v or '').strip()
+        elif 'oggetto' in lk: out['oggetto'] = str(v or '').strip()
+        elif 'data rda' in lk: out['data'] = str(v or '').strip()
+    return out
+
+
+def merge_detected(offer, rda, xls):
+    # Precedenza: Excel per dati gestionali, RDA per richiesta interna, offerta per dati economici/fornitore precisi.
+    d = {}
+    for src in (offer, rda, xls):
+        for k,v in src.items():
+            if v not in ('',None,0,0.0): d[k]=v
+    # eccezioni utili
+    if offer.get('totale'): d['totale'] = offer['totale']
+    if offer.get('fornitore'): d['fornitore'] = offer['fornitore']
+    if rda.get('data'): d['data'] = rda['data']
+    if xls.get('rda'): d['rda'] = xls['rda']
+    return d
+
 
 def decide(d):
-    docs=[]; reasons=[]; warnings=[]
-    # Nuova procedura: il motore evita automatismi non supportati e chiede le condizioni rilevanti.
-    docs += ['4','6']
-    reasons += ['Allegato 4: requisiti sicurezza/compliance','Allegato 6: valutazione trattamento dati e firma del modulo']
-    if not d['nuova_tranche_senza_variazione'] and not d['precontrattuale']:
+    docs=['4','6']
+    reasons=['Allegato 4: requisiti sicurezza/compliance','Allegato 6: trattamento dati']
+    if not d.get('nuova_tranche_senza_variazione') and not d.get('precontrattuale'):
         docs.append('7'); reasons.append('Allegato 7: razionali fabbisogno/prezzo')
-    if d['deroga'] or d['side_letter']:
-        docs.append('OFFERTA'); reasons.append('Offerta: acquisto in deroga o gruppo merce Side Letter')
-    if d['totale'] > 20000:
-        docs.append('3A'); reasons.append('Allegato 3A: importo RDA superiore a € 20.000 (regola operativa Olivetti)')
-    if d['gara_prest_prof']:
-        docs.append('13'); reasons.append('Allegato 13: gara per prestazioni professionali')
-    if d['saas']:
-        docs.append('14'); reasons.append('Allegato 14: checklist sicurezza SaaS')
-    if d['cliente_tipo']=='Privato' and d['trattamento_cliente']:
-        docs.append('11'); reasons.append('Allegato 11: ATCS cliente privato')
-    if d['cliente_tipo']=='PA' and d['trattamento_cliente']:
-        docs.append('12'); reasons.append('Allegato 12: ATCS cliente PA')
-    if d['amministratore_sistema']:
-        docs.append('15'); reasons.append('Allegato 15: attività di Amministratore di Sistema')
-    if d['trattamento_dati']:
-        docs.append('10'); reasons.append('Allegato 10: istruzioni data breach per responsabili terzi')
-    if d['attestazione_conformita']:
-        docs.append('16'); reasons.append('Allegato 16: attestazione conformità privacy')
-    if d['acquisto_speciale']:
-        warnings.append('Acquisto Speciale selezionato: il 3A resta incluso se l’importo RDA supera € 20.000, secondo la regola operativa impostata.')
-    if d['trattativa_diretta'] and not d['casistica_td'] and not d['acquisto_speciale']:
-        warnings.append('Selezionare la casistica di Trattativa Diretta (Allegato 1).')
-    return list(dict.fromkeys(docs)), reasons, warnings
+    if d.get('deroga') or d.get('side_letter'):
+        docs.append('OFFERTA'); reasons.append('Offerta: deroga/Side Letter')
+    if float(d.get('totale') or 0) > 20000:
+        docs.append('3A'); reasons.append('Allegato 3A: importo > €20.000 (regola operativa impostata)')
+    if d.get('gara_prest_prof'): docs.append('13')
+    if d.get('saas'): docs.append('14')
+    if d.get('cliente_tipo')=='Privato' and d.get('trattamento_cliente'): docs.append('11')
+    if d.get('cliente_tipo')=='PA' and d.get('trattamento_cliente'): docs.append('12')
+    if d.get('amministratore_sistema'): docs.append('15')
+    if d.get('trattamento_dati'): docs.append('10')
+    if d.get('attestazione_conformita'): docs.append('16')
+    return list(dict.fromkeys(docs)), reasons
+
 
 def xml_replace(src,dst,repls,occurrence_repls=None):
-    """Sostituzione sicura nei nodi di testo OOXML: non corrompe il DOCX con &, <, >, accenti."""
     from lxml import etree
-    occurrence_repls=occurrence_repls or []
-    counts={}
+    occurrence_repls=occurrence_repls or []; counts={}
     with zipfile.ZipFile(src,'r') as zin, zipfile.ZipFile(dst,'w',zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
             data=zin.read(item.filename)
@@ -74,187 +186,173 @@ def xml_replace(src,dst,repls,occurrence_repls=None):
                     for node in root.xpath('//*[local-name()="t"]'):
                         if node.text is None: continue
                         text=node.text
-                        for a,b in repls.items():
-                            if a in text:
-                                text=text.replace(a,str(b))
+                        for a,b in repls.items(): text=text.replace(a,str(b)) if a in text else text
                         for old,new,n in occurrence_repls:
                             if old in text:
                                 counts[old]=counts.get(old,0)+1
-                                if counts[old]==n:
-                                    text=text.replace(old,str(new),1)
+                                if counts[old]==n: text=text.replace(old,str(new),1)
                         node.text=text
                     data=etree.tostring(root,xml_declaration=True,encoding='UTF-8',standalone=True)
-                except Exception:
-                    pass
+                except Exception: pass
             zout.writestr(item,data)
+
 
 def make7(d,out):
     repl={
-      '21/09/2026':d['data'], 'OLIVETTI - P&amp;DI CPP':d['funzione'], 'OLIVETTI - P&DI CPP':d['funzione'],
-      'ANTONIO SCUCCIMARRA':d['fornitore'],
-      'Nota Spese Giugno, CB Centro Sud Puglia - Acque del Sud':d['oggetto'],
-      'supporto per attività commerciale propedeutica alla riuscita del Progetto Water Management System gestito da Portfolio IoT':d['motivazione'],
-      '216,40':fmt_eur(d['totale']).replace('€ ','')
-    }
+      '21/09/2026':d.get('data',''), 'OLIVETTI - P&DI CPP':d.get('funzione',''),
+      'ANTONIO SCUCCIMARRA':d.get('fornitore',''),
+      'Nota Spese Giugno, CB Centro Sud Puglia - Acque del Sud':d.get('oggetto',''),
+      'supporto per attività commerciale propedeutica alla riuscita del Progetto Water Management System gestito da Portfolio IoT':d.get('motivazione',''),
+      '216,40':fmt_eur(d.get('totale',0)).replace('€ ','')}
     xml_replace(T/'allegato7.docx',out,repl)
 
+
 def make6(d,out):
-    repl={'2101416996':d['rda']}
-    # Il modello caricato contiene due placeholder consecutivi nella riga Riferimenti/Fornitore.
-    occ=[('Scrivere qui',d['riferimenti'],1),('Scrivere qui',d['fornitore'],2)]
+    repl={'2101416996':d.get('rda','')}
+    occ=[('Scrivere qui',d.get('riferimenti',''),1),('Scrivere qui',d.get('fornitore',''),2)]
     xml_replace(T/'allegato6.docx',out,repl,occ)
 
+
 def make3a(d,out):
-    # Lavora sul DOCX originale: niente sostituzioni globali di numeri/placeholder.
     shutil.copy2(T/'allegato3.docx',out)
-    doc=Document(out)
-    # Data del solo 3A (non altera i placeholder del 3B).
+    doc=Document(out); t=doc.tables[1]
     for p in doc.paragraphs:
-        if p.text.strip()=='Luogo, gg/mm/aaaa':
-            p.text='Luogo Roma, '+d.get('data','')
-            break
-    t=doc.tables[1]
+        if p.text.strip()=='Luogo, gg/mm/aaaa': p.text='Luogo Roma, '+d.get('data',''); break
     t.cell(2,0).text='Fornitore proposto:\n'+d.get('fornitore','')
-    t.cell(2,1).text='Cod. Sap: '+d.get('sap','')
-    t.cell(2,3).text='P.IVA: '+d.get('piva','')
-    t.cell(3,0).text='Importo TD: '+fmt_eur(d.get('totale',0))
-    if d.get('importo_cumulato'):
-        t.cell(3,1).text='Importo cumulato dei BO/contratti comprensivo della TD in oggetto:\n'+fmt_eur(d['importo_cumulato'])
-    t.cell(3,3).text='N° RDA (se emessa): '+d.get('rda','')
-    if d.get('tipo_td'): t.cell(4,0).text='La richiesta di Trattativa Diretta è per: '+d['tipo_td']
-    if d.get('ultimo_contratto'): t.cell(4,1).text='Numero ultimo contratto/BO di riferimento:\nN.°: '+d['ultimo_contratto']
-    if d.get('data_inizio') or d.get('data_fine'): t.cell(4,3).text=f"Periodo fornitura:\ninizio: {d.get('data_inizio','')}    fine: {d.get('data_fine','')}"
-    if d.get('pluriennale'): t.cell(5,0).text='Attività pluriennale (progetto di durata superiore ad 1 anno): '+d['pluriennale']
-    if d.get('casistica_td'): t.cell(6,0).text="Valorizzare il campo con una delle casistiche dell’allegato 1: "+d['casistica_td']
-    if d.get('descrizione_3a'): t.cell(7,0).text='Descrizione chiara, dettagliata e circostanziata dell’oggetto della richiesta, con indicazione dei tempi di realizzazione:\n'+d['descrizione_3a']
-    if d.get('acquisto_tecnologia'): t.cell(8,0).text='Acquisto di tecnologia: '+d['acquisto_tecnologia']
-    if d.get('tecnologia'): t.cell(8,2).text='Indicare la tecnologia:\n'+d['tecnologia']
-    if d.get('vincolo_tecnologico'): t.cell(9,0).text='Vincolo tecnologico / legame fornitore-cliente-vendor:\n'+d['vincolo_tecnologico']
-    if d.get('rischi_altro_fornitore'): t.cell(10,0).text='Rischi derivanti dall’affidamento a fornitore diverso da quello proposto:\n'+d['rischi_altro_fornitore']
-    if d.get('legacy'): t.cell(11,0).text='Continuità tecnologica / grado di legacy e tempi per avvio processo competitivo:\n'+d['legacy']
-    if d.get('continuita'): t.cell(12,0).text='La richiesta è relativa ad attività in continuità con lo stesso fornitore? '+d['continuita']
-    if d.get('fornitore_impegnato'): t.cell(13,0).text='Fornitore è già impegnato? '+d['fornitore_impegnato']
-    if d.get('stato_fornitura'): t.cell(14,0).text='Stato della fornitura: '+d['stato_fornitura']
-    if d.get('motivazione_sanatoria'): t.cell(15,0).text='Motivazione esclusione Atto a Sanatoria:\n'+d['motivazione_sanatoria']
-    if d.get('documenti_allegati'): t.cell(16,0).text='Elenco documenti allegati:\n'+d['documenti_allegati']
+    t.cell(2,1).text='Cod. Sap: '+d.get('sap',''); t.cell(2,3).text='P.IVA: '+d.get('piva','')
+    t.cell(3,0).text='Importo TD: '+fmt_eur(d.get('totale',0)); t.cell(3,3).text='N° RDA (se emessa): '+d.get('rda','')
+    if d.get('casistica_td'): t.cell(6,0).text="Casistica Allegato 1: "+d['casistica_td']
+    if d.get('motivazione'): t.cell(7,0).text='Descrizione dettagliata:\n'+d['motivazione']
     if d.get('cliente'): t.cell(17,0).text='Cliente destinatario della fornitura: '+d['cliente']
     doc.save(out)
 
+
 def package(d,docs,offer_bytes=None,offer_name=None):
-    td=Path(tempfile.mkdtemp())
-    produced=[]
-    if '4' in docs: shutil.copy2(T/'allegato4.docx',td/f"RDA {d['rda']} - Allegato 4.docx"); produced.append(td/f"RDA {d['rda']} - Allegato 4.docx")
-    if '6' in docs: make6(d,td/f"RDA {d['rda']} - Allegato 6.docx"); produced.append(td/f"RDA {d['rda']} - Allegato 6.docx")
-    if '7' in docs: make7(d,td/f"RDA {d['rda']} - Allegato 7.docx"); produced.append(td/f"RDA {d['rda']} - Allegato 7.docx")
-    if '3A' in docs: make3a(d,td/f"RDA {d['rda']} - Allegato 3A - DA VERIFICARE.docx"); produced.append(td/f"RDA {d['rda']} - Allegato 3A - DA VERIFICARE.docx")
-    for n in ['10','11','12','13','15','16']:
-        if n in docs:
-            shutil.copy2(T/f'allegato{n}.docx',td/f"RDA {d['rda']} - Allegato {n}.docx"); produced.append(td/f"RDA {d['rda']} - Allegato {n}.docx")
-    if '14' in docs:
-        shutil.copy2(T/'allegato14.xlsx',td/f"RDA {d['rda']} - Allegato 14.xlsx"); produced.append(td/f"RDA {d['rda']} - Allegato 14.xlsx")
+    td=Path(tempfile.mkdtemp()); produced=[]
+    def cp(src,name):
+        p=td/name; shutil.copy2(src,p); produced.append(p)
+    if '4' in docs: cp(T/'allegato4.docx',f"RDA {d.get('rda','')} - Allegato 4.docx")
+    if '6' in docs:
+        p=td/f"RDA {d.get('rda','')} - Allegato 6.docx"; make6(d,p); produced.append(p)
+    if '7' in docs:
+        p=td/f"RDA {d.get('rda','')} - Allegato 7.docx"; make7(d,p); produced.append(p)
+    if '3A' in docs:
+        p=td/f"RDA {d.get('rda','')} - Allegato 3A - DA VERIFICARE.docx"; make3a(d,p); produced.append(p)
+    for n in ['1','2','10','11','12','13','15','16']:
+        if n in docs: cp(T/f'allegato{n}.docx',f"RDA {d.get('rda','')} - Allegato {n}.docx")
+    if '14' in docs: cp(T/'allegato14.xlsx',f"RDA {d.get('rda','')} - Allegato 14.xlsx")
     if 'OFFERTA' in docs:
         if offer_bytes:
             p=td/(offer_name or 'Offerta.pdf'); p.write_bytes(offer_bytes); produced.append(p)
         else:
-            p=td/'OFFERTA_MANCANTE.txt'; p.write_text('Caricare l’offerta del fornitore prima di chiudere la RDA.',encoding='utf-8'); produced.append(p)
+            p=td/'OFFERTA_MANCANTE.txt'; p.write_text('Offerta non caricata.',encoding='utf-8'); produced.append(p)
     z=io.BytesIO()
     with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED) as zz:
         for p in produced: zz.write(p,p.name)
     return z.getvalue()
 
-st.set_page_config(page_title='Generatore RDA Olivetti v0.4.2',layout='wide')
-st.title('Generatore RDA Olivetti — v0.4.2')
-st.caption('Nuova procedura: motore decisionale + compilazione sui DOCX originali. I campi non supportati non vengono inventati.')
 
-c1,c2,c3=st.columns(3)
-with c1:
-    rda=st.text_input('N. RDA')
-    fornitore=st.text_input('Fornitore')
-    sap=st.text_input('Codice SAP fornitore')
-    piva=st.text_input('P. IVA fornitore')
-    totale=euro(st.text_input('Totale RDA','0,00'))
-with c2:
-    data=st.text_input('Data','21/09/2026')
-    funzione=st.text_input('Funzione richiedente','OLIVETTI - P&DI CPP')
-    cliente=st.text_input('Cliente / Gara')
-    cliente_tipo=st.selectbox('Tipo cliente',['n.a.','Privato','PA'])
-    riferimenti=st.text_input('Riferimenti (SDW/SH/PCD, se applicabile)')
-with c3:
-    oggetto=st.text_area('Oggetto')
-    motivazione=st.text_area('Motivazione / descrizione esigenza')
+st.set_page_config(page_title='Generatore RDA Olivetti v0.5',layout='wide')
+st.title('Generatore RDA Olivetti — v0.5')
+st.caption('Carica Offerta + Richiesta RDA + riga Excel. L’app estrae i dati, te li fa verificare e poi genera gli allegati scelti.')
 
-st.subheader('Domande decisionali')
+st.subheader('1. Carica i documenti di partenza')
 a,b,c=st.columns(3)
-with a:
-    pre_sales=st.checkbox('RDA Pre Sales')
-    trattativa_diretta=st.checkbox('Trattativa Diretta')
-    acquisto_speciale=st.checkbox('Acquisto Speciale (Allegato 2)')
-    infragruppo=st.checkbox('Acquisto infragruppo')
-with b:
-    accordo_esistente=st.checkbox('Contratto/AQ/listino già in essere')
-    nuova_tranche_senza_variazione=st.checkbox('Nuova tranche senza variazione valore complessivo')
-    precontrattuale=st.checkbox('Ingaggio fornitore in fase precontrattuale')
-    deroga=st.checkbox('Acquisto in deroga')
-    side_letter=st.checkbox('Gruppo merce soggetto a Side Letter')
+with a: offer_file=st.file_uploader('OFFERTA fornitore',type=['pdf'],key='offer')
+with b: rda_file=st.file_uploader('RICHIESTA RDA',type=['pdf'],key='rda_pdf')
 with c:
-    trattamento_dati=st.checkbox('La fornitura tratta dati personali')
-    trattamento_cliente=st.checkbox('Trattamento dati di cui il cliente è Titolare/Responsabile')
-    saas=st.checkbox('Servizio SaaS')
-    amministratore_sistema=st.checkbox('Attività di Amministratore di Sistema')
-    gara_prest_prof=st.checkbox('Gara per prestazioni professionali')
-    attestazione_conformita=st.checkbox('Richiesta attestazione conformità privacy')
+    excel_file=st.file_uploader('FILE EXCEL (opzionale)',type=['xlsx','xlsm'],key='xls')
+    excel_row=st.number_input('Numero riga Excel da leggere',min_value=2,value=2,step=1,disabled=not bool(excel_file))
 
-casistica_td=''
-if trattativa_diretta and not acquisto_speciale:
-    casistica_td=st.selectbox('Casistica Trattativa Diretta — Allegato 1',['']+CASI_TD)
-if acquisto_speciale:
-    st.selectbox('Casistica Acquisto Speciale — Allegato 2',['']+SPECIALI)
+offer_data=extract_offer(pdf_text(offer_file)) if offer_file else {}
+rda_data=extract_rda(pdf_text(rda_file)) if rda_file else {}
+raw_xls,_=extract_excel(excel_file,int(excel_row)) if excel_file else ({},[])
+xls_data=excel_map(raw_xls)
+detected=merge_detected(offer_data,rda_data,xls_data)
 
-# Sezione 3A: secondo la regola operativa Olivetti impostata nel generatore,
-# ogni RDA con importo > € 20.000 richiede l'Allegato 3A.
-st.subheader('Allegato 3A — verifica e compilazione')
-three_a_eligible = totale > 20000
-if totale <= 20000:
-    st.info('Allegato 3A: NO — importo RDA non superiore a € 20.000.')
+if offer_file or rda_file or excel_file:
+    st.subheader('2. Dati trovati automaticamente — controlla/correggi')
+    st.caption('I campi vuoti non sono stati trovati con sufficiente affidabilità: compilali tu. Il programma non inventa dati mancanti.')
+    c1,c2,c3=st.columns(3)
+    with c1:
+        rda=st.text_input('N. RDA',value=str(detected.get('rda','')))
+        fornitore=st.text_input('Fornitore',value=str(detected.get('fornitore','')))
+        sap=st.text_input('Codice SAP fornitore',value=str(detected.get('sap','')))
+        piva=st.text_input('P.IVA fornitore',value=str(detected.get('piva','')))
+        totale=euro(st.text_input('Totale RDA / Offerta',value=fmt_eur(detected.get('totale',0)).replace('€ ','')))
+    with c2:
+        data=st.text_input('Data richiesta',value=str(detected.get('data','')))
+        commessa=st.text_input('Commessa',value=str(detected.get('commessa','')))
+        cliente=st.text_input('Cliente / Gara / Progetto',value=str(detected.get('cliente') or detected.get('progetto','')))
+        richiedente=st.text_input('Richiedente',value=str(detected.get('richiedente','')))
+        funzione=st.text_input('Funzione richiedente',value='OLIVETTI - P&DI CPP')
+    with c3:
+        oggetto_default=detected.get('oggetto','')
+        if rda_data.get('quantita') and oggetto_default: oggetto_default=f"n. {rda_data['quantita']} {oggetto_default}"
+        oggetto=st.text_area('Oggetto',value=str(oggetto_default))
+        motivazione=st.text_area('Motivazione / descrizione esigenza',value='')
+        riferimenti=st.text_input('Riferimenti (SDW/SH/PCD, se applicabile)')
+        consegna=st.text_input('Consegna rilevata',value=str(detected.get('consegna','')))
+
+    with st.expander('Mostra cosa è stato letto dai tre input'):
+        st.write('**Offerta:**', offer_data or 'nessun dato')
+        st.write('**Richiesta RDA:**', rda_data or 'nessun dato')
+        st.write('**Riga Excel:**', raw_xls or 'nessun dato')
+
+    st.subheader('3. Scegli come determinare gli allegati')
+    mode=st.radio('Modalità', ['Li indico io','Determina automaticamente'],horizontal=True)
+
+    # defaults shared by both modes
+    flags={k:False for k in ['nuova_tranche_senza_variazione','precontrattuale','deroga','side_letter','gara_prest_prof','saas','trattamento_cliente','amministratore_sistema','trattamento_dati','attestazione_conformita']}
+    cliente_tipo='n.a.'; casistica_td=''
+
+    if mode=='Li indico io':
+        default_docs=['4','6','7'] + (['3A'] if totale>20000 else [])
+        selected_docs=st.multiselect('Allegati da generare',ALL_DOCS,default=default_docs)
+        docs=selected_docs
+        st.caption('In questa modalità la tua scelta prevale sul motore decisionale.')
+        if '3A' in docs:
+            casistica_td=st.selectbox('Casistica TD per il 3A (se applicabile)',['']+CASI_TD)
+    else:
+        q1,q2,q3=st.columns(3)
+        with q1:
+            flags['deroga']=st.checkbox('Acquisto in deroga')
+            flags['side_letter']=st.checkbox('Side Letter')
+            flags['nuova_tranche_senza_variazione']=st.checkbox('Nuova tranche senza variazione valore')
+            flags['precontrattuale']=st.checkbox('Ingaggio precontrattuale')
+        with q2:
+            td=st.checkbox('Trattativa Diretta')
+            speciale=st.checkbox('Acquisto Speciale')
+            if td and not speciale: casistica_td=st.selectbox('Casistica TD',['']+CASI_TD)
+            if speciale: st.selectbox('Casistica Acquisto Speciale',['']+SPECIALI)
+            flags['gara_prest_prof']=st.checkbox('Gara prestazioni professionali')
+        with q3:
+            flags['trattamento_dati']=st.checkbox('Tratta dati personali')
+            flags['trattamento_cliente']=st.checkbox('Tratta dati del Cliente')
+            cliente_tipo=st.selectbox('Tipo cliente',['n.a.','Privato','PA'])
+            flags['saas']=st.checkbox('SaaS')
+            flags['amministratore_sistema']=st.checkbox('Amministratore di Sistema')
+            flags['attestazione_conformita']=st.checkbox('Attestazione conformità privacy')
+        temp={'totale':totale,'cliente_tipo':cliente_tipo,**flags}
+        docs,reasons=decide(temp)
+        st.write('**Proposta automatica:** '+', '.join(docs))
+        for reason in reasons: st.caption('• '+reason)
+
+    st.subheader('4. Controllo finale')
+    missing=[]
+    for label,val in [('N. RDA',rda),('Fornitore',fornitore),('Oggetto',oggetto)]:
+        if not val: missing.append(label)
+    if '3A' in docs and totale<=20000:
+        st.warning('Hai selezionato manualmente il 3A con importo non superiore a €20.000: verrà comunque generato perché in modalità manuale la tua scelta prevale.')
+    if missing: st.warning('Da completare prima della generazione: '+', '.join(missing))
+    st.write('**Pacchetto:** '+(', '.join(docs) if docs else 'nessun allegato'))
+
+    d=dict(rda=rda,fornitore=fornitore,sap=sap,piva=piva,totale=totale,data=data,commessa=commessa,
+           cliente=cliente,richiedente=richiedente,funzione=funzione,oggetto=oggetto,motivazione=motivazione,
+           riferimenti=riferimenti,consegna=consegna,casistica_td=casistica_td,cliente_tipo=cliente_tipo,**flags)
+
+    if st.button('GENERA PACCHETTO RDA',type='primary',disabled=bool(missing or not docs)):
+        z=package(d,docs,offer_file.getvalue() if offer_file else None,offer_file.name if offer_file else None)
+        st.download_button('Scarica ZIP RDA',z,file_name=f"RDA_{rda}_allegati.zip",mime='application/zip')
 else:
-    st.success('Allegato 3A: SÌ — importo RDA superiore a € 20.000. Verrà inserito nel pacchetto e precompilato.')
-    if not trattativa_diretta:
-        st.caption('Il 3A viene richiesto dalla regola operativa >20k anche se la pratica non è stata marcata come Trattativa Diretta.')
-
-importo_cumulato=0.0; tipo_td=''; ultimo_contratto=''; data_inizio=''; data_fine=''; pluriennale=''
-descrizione_3a=''; acquisto_tecnologia=''; tecnologia=''; vincolo_tecnologico=''; rischi_altro_fornitore=''
-legacy=''; continuita=''; fornitore_impegnato=''; stato_fornitura=''; motivazione_sanatoria=''; documenti_allegati=''
-if three_a_eligible:
-    x1,x2=st.columns(2)
-    with x1:
-        importo_cumulato=euro(st.text_input('3A — Importo cumulato BO/contratti comprensivo TD','0,00'))
-        tipo_td=st.selectbox('3A — La richiesta di TD è per',['','Nuova fornitura','Rinnovo','Estensione/variante','Altro'])
-        ultimo_contratto=st.text_input('3A — Numero ultimo contratto/BO di riferimento')
-        data_inizio=st.text_input('3A — Inizio fornitura (gg/mm/aaaa)')
-        data_fine=st.text_input('3A — Fine fornitura (gg/mm/aaaa)')
-        pluriennale=st.selectbox('3A — Attività pluriennale',['','No','Sì'])
-        acquisto_tecnologia=st.selectbox('3A — Acquisto di tecnologia',['','No','Sì'])
-        tecnologia=st.text_input('3A — Tecnologia, se applicabile')
-    with x2:
-        descrizione_3a=st.text_area('3A — Descrizione dettagliata',value=motivazione)
-        vincolo_tecnologico=st.text_area('3A — Vincolo tecnologico / vendor, se applicabile')
-        rischi_altro_fornitore=st.text_area('3A — Rischi con un fornitore diverso')
-        legacy=st.text_area('3A — Legacy / continuità tecnologica, se applicabile')
-        continuita=st.selectbox('3A — Continuità con lo stesso fornitore',['','No','Sì'])
-        fornitore_impegnato=st.selectbox('3A — Fornitore già impegnato',['','No','Sì'])
-        stato_fornitura=st.selectbox('3A — Stato fornitura',['','Non avviata','In corso','Completata'])
-        motivazione_sanatoria=st.text_area('3A — Motivazione esclusione Atto a Sanatoria, se applicabile')
-        documenti_allegati=st.text_area('3A — Elenco documenti allegati')
-
-d=locals().copy()
-docs,reasons,warnings=decide(d)
-st.subheader('Anteprima allegati')
-st.write('**Da predisporre:** '+(', '.join(docs) if docs else 'nessuno'))
-for x in reasons: st.write('• '+x)
-for w in warnings: st.warning(w)
-
-offer=st.file_uploader('Offerta del fornitore (se richiesta)',type=['pdf','docx','xlsx'])
-if st.button('GENERA PACCHETTO RDA',type='primary',disabled=not bool(rda and fornitore and oggetto)):
-    z=package(d,docs,offer.getvalue() if offer else None,offer.name if offer else None)
-    st.download_button('Scarica ZIP RDA',z,file_name=f'RDA_{rda}_allegati.zip',mime='application/zip')
-    if '3A' in docs: st.info('Il 3A viene precompilato nei campi sicuri e marcato DA VERIFICARE: contiene campi autorizzativi/contrattuali che non vanno inventati.')
+    st.info('Carica almeno uno dei documenti per iniziare. Il flusso consigliato è: Offerta + Richiesta RDA + file Excel.')
