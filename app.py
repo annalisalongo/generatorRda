@@ -367,9 +367,21 @@ def make7(d,out):
 
 
 def make6(d,out):
-    repl={'2101416996':d.get('rda','')}
-    occ=[('Scrivere qui',d.get('riferimenti',''),1),('Scrivere qui',d.get('fornitore',''),2)]
-    xml_replace(T/'allegato6.docx',out,repl,occ)
+    # Prima conserva il layout originale e sostituisce i campi semplici.
+    repl={'2101416996': d.get('rda','')}
+    xml_replace(T/'allegato6.docx',out,repl)
+
+    # Alcuni campi del modello sono spezzati su più run Word: li compiliamo
+    # a livello di paragrafo per evitare che restino placeholder nel documento.
+    doc=Document(out)
+    for p in doc.paragraphs:
+        txt=p.text.strip()
+        if txt.startswith('Riferimenti (*):') and 'Fornitore:' in txt:
+            p.text=f"Riferimenti (*): {d.get('riferimenti','')}\tFornitore: {d.get('fornitore','')}"
+        elif txt.startswith('1° Riporto'):
+            right = txt[len('1° Riporto'):].lstrip('\t ')
+            p.text='Paolo Sigismondi - 1° Riporto' + (('\t' + right) if right else '')
+    doc.save(out)
 
 
 def make3a(d,out):
@@ -386,22 +398,51 @@ def make3a(d,out):
     doc.save(out)
 
 
+ATTACHMENT_NAMES = {
+    '1': 'ALLEGATO 1 - Elenco tipologie di Trattativa Diretta_lista casistiche ammesse per gli acquisti di trattativa diretta',
+    '2': 'ALLEGATO 2 - Casistiche di Acquisti Speciali',
+    '3A': 'ALLEGATO 3A - Richiesta preventiva di autorizzazione per il ricorso a Trattativa Diretta',
+    '4': 'ALLEGATO 4 - Requisiti di Sicurezza e di Compliance ICT per i fornitori',
+    '5': 'ALLEGATO 5 - Scheda motivazionale per le richieste d’acquisto',
+    '6': 'ALLEGATO 6 - Trattamento dei Dati personali',
+    '7': 'ALLEGATO 7 - Razionali per RDA_modulo razionali dimensionanti dei fabbisogni e prezzi di riferimento di definizione budget RdA',
+    '10': 'ALLEGATO 10 - Adempimenti previsti in caso di violazioni di dati personali - Data Breach',
+    '11': 'ALLEGATO 11 - Allegato Tecnico di Compliance e Sicurezza - Settore Privato',
+    '12': 'ALLEGATO 12 - Allegato Tecnico di Compliance e Sicurezza - Pubblica Amministrazione',
+    '13': 'ALLEGATO 13 - Allegato tecnico per l’indizione di una gara per prestazioni professionali',
+    '14': 'ALLEGATO 14 - Check List Requisiti di Sicurezza SaaS',
+    '15': 'ALLEGATO 15 - Misure e accorgimenti relativi alle attribuzioni delle funzioni di Amministratore di Sistema',
+    '16': 'ALLEGATO 16 - Attestazione di conformità ai requisiti di compliance relativi al trattamento dei dati personali',
+}
+
+def attachment_filename(rda, code, ext):
+    """Nome file standard: RDA <numero> ALLEGATO <n> - <nome ufficiale>.<ext>"""
+    title = ATTACHMENT_NAMES[code]
+    # Evita caratteri non validi nei nomi file Windows mantenendo il titolo leggibile.
+    title = re.sub(r'[\\/:*?"<>|]+', '-', title).strip()
+    return f"RDA {rda} {title}.{ext}"
+
 def package(d,docs,offer_bytes=None,offer_name=None):
     td=Path(tempfile.mkdtemp()); produced=[]
-    def cp(src,name):
-        p=td/name; shutil.copy2(src,p); produced.append(p)
-    if '4' in docs: cp(T/'allegato4.docx',f"RDA {d.get('rda','')} - Allegato 4.docx")
+    rda=str(d.get('rda','')).strip() or 'SENZA_NUMERO'
+
+    def cp(src,code,ext='docx'):
+        p=td/attachment_filename(rda,code,ext)
+        shutil.copy2(src,p); produced.append(p)
+
+    if '4' in docs: cp(T/'allegato4.docx','4')
     if '6' in docs:
-        p=td/f"RDA {d.get('rda','')} - Allegato 6.docx"; make6(d,p); produced.append(p)
+        p=td/attachment_filename(rda,'6','docx'); make6(d,p); produced.append(p)
     if '7' in docs:
-        p=td/f"RDA {d.get('rda','')} - Allegato 7.docx"; make7(d,p); produced.append(p)
+        p=td/attachment_filename(rda,'7','docx'); make7(d,p); produced.append(p)
     if '3A' in docs:
-        p=td/f"RDA {d.get('rda','')} - Allegato 3A - DA VERIFICARE.docx"; make3a(d,p); produced.append(p)
+        p=td/attachment_filename(rda,'3A','docx'); make3a(d,p); produced.append(p)
     for n in ['1','2','10','11','12','13','15','16']:
-        if n in docs: cp(T/f'allegato{n}.docx',f"RDA {d.get('rda','')} - Allegato {n}.docx")
-    if '14' in docs: cp(T/'allegato14.xlsx',f"RDA {d.get('rda','')} - Allegato 14.xlsx")
+        if n in docs: cp(T/f'allegato{n}.docx',n)
+    if '14' in docs: cp(T/'allegato14.xlsx','14','xlsx')
     if 'OFFERTA' in docs:
         if offer_bytes:
+            # L'offerta mantiene il proprio nome originale: non è un Allegato numerato.
             p=td/(offer_name or 'Offerta.pdf'); p.write_bytes(offer_bytes); produced.append(p)
         else:
             p=td/'OFFERTA_MANCANTE.txt'; p.write_text('Offerta non caricata.',encoding='utf-8'); produced.append(p)
@@ -411,8 +452,8 @@ def package(d,docs,offer_bytes=None,offer_name=None):
     return z.getvalue()
 
 
-st.set_page_config(page_title='Generatore RDA Olivetti v0.5.3',layout='wide')
-st.title('Generatore RDA Olivetti — v0.5.3')
+st.set_page_config(page_title='Generatore RDA Olivetti v0.5.4',layout='wide')
+st.title('Generatore RDA Olivetti — v0.5.4')
 st.caption('Carica Offerta + Richiesta RDA e incolla una riga copiata dalla Bibbia Excel. L’app estrae i dati e legge anche gli allegati da generare.')
 
 st.subheader('1. Documenti e riga della Bibbia Excel')
