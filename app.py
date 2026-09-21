@@ -19,7 +19,7 @@ CASI_TD = [
 '7 - Estensione condizioni/prezzi di competizione',
 '8 - Progetto business/tecnologico identificato con fabbisogni e fornitori puntuali',
 '9 - Commercializzazione prodotti/soluzioni non standard a clienti privati',
-'10 - Opportunità business per commercializzazione verso PA'] 
+'10 - Opportunità business per commercializzazione verso PA']
 
 SPECIALI = [
 '1 - Scelte tecnologiche/business di Gruppo da unico fornitore',
