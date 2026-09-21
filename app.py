@@ -47,9 +47,22 @@ def euro(s):
     if not raw or raw in {'-', '.', ','}:
         return 0.0
 
-    # Formato italiano completo: 1.234,56
-    if ',' in raw:
-        normalized = raw.replace('.', '').replace(',', '.')
+    # Se sono presenti entrambi i separatori, l'ultimo indica i decimali:
+    # 1.234,56 -> 1234.56 ; 1,234.56 -> 1234.56
+    if ',' in raw and '.' in raw:
+        if raw.rfind(',') > raw.rfind('.'):
+            normalized = raw.replace('.', '').replace(',', '.')
+        else:
+            normalized = raw.replace(',', '')
+    elif ',' in raw:
+        parts = raw.split(',')
+        # Un solo separatore seguito da 3 cifre, oppure gruppi ripetuti da 3 cifre,
+        # viene trattato come separatore delle migliaia: 6,400 -> 6400.
+        if len(parts) > 1 and all(len(x) == 3 for x in parts[1:]) and parts[0].lstrip('-').isdigit():
+            normalized = ''.join(parts)
+        else:
+            # Virgola decimale italiana: 6400,00 -> 6400.00
+            normalized = raw.replace(',', '.')
     elif '.' in raw:
         parts = raw.split('.')
         # Uno o piu' gruppi da 3 cifre dopo il punto => separatore delle migliaia.
