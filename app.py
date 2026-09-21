@@ -1,5 +1,6 @@
 from pathlib import Path
 import io, re, shutil, tempfile, zipfile
+from lxml import etree
 import streamlit as st
 from docx import Document
 
@@ -60,20 +61,53 @@ def decide(d):
         warnings.append('Selezionare la casistica di Trattativa Diretta (Allegato 1).')
     return list(dict.fromkeys(docs)), reasons, warnings
 
-def xml_replace(src,dst,repls,occurrence_repls=None):
-    occurrence_repls=occurrence_repls or []
-    with zipfile.ZipFile(src,'r') as zin, zipfile.ZipFile(dst,'w',zipfile.ZIP_DEFLATED) as zout:
+def xml_replace(src, dst, repls, occurrence_repls=None):
+    """Sostituisce testo nei nodi Word w:t senza manipolare XML come stringa.
+
+    Questo evita DOCX corrotti quando i valori contengono &, <, >, apostrofi,
+    accenti o altri caratteri che in XML devono essere escapati.
+    """
+    occurrence_repls = occurrence_repls or []
+    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    occurrence_count = {}
+
+    with zipfile.ZipFile(src, 'r') as zin, zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
-            data=zin.read(item.filename)
-            if item.filename.endswith('.xml'):
-                text=data.decode('utf-8')
-                for a,b in repls.items(): text=text.replace(a,str(b))
-                for old,new,n in occurrence_repls:
-                    parts=text.split(old)
-                    if len(parts)>n:
-                        text=old.join(parts[:n])+str(new)+old.join(parts[n:])
-                data=text.encode('utf-8')
-            zout.writestr(item,data)
+            data = zin.read(item.filename)
+
+            # Modifichiamo solo i file XML di Word, tramite parser XML vero.
+            if item.filename.startswith('word/') and item.filename.endswith('.xml'):
+                try:
+                    root = etree.fromstring(data)
+                    nodes = root.xpath('//w:t', namespaces=ns)
+
+                    for node in nodes:
+                        if node.text is None:
+                            continue
+
+                        # Sostituzioni normali, limitate al contenuto dei nodi di testo.
+                        for old, new in repls.items():
+                            if old in node.text:
+                                node.text = node.text.replace(old, str(new))
+
+                        # Sostituzioni per N-esima occorrenza, se presenti nel template.
+                        for old, new, wanted_n in occurrence_repls:
+                            if old in node.text:
+                                occurrence_count[old] = occurrence_count.get(old, 0) + 1
+                                if occurrence_count[old] == wanted_n:
+                                    node.text = node.text.replace(old, str(new), 1)
+
+                    data = etree.tostring(
+                        root,
+                        xml_declaration=True,
+                        encoding='UTF-8',
+                        standalone=True
+                    )
+                except etree.XMLSyntaxError:
+                    # Se un XML accessorio non è parsabile, lo copiamo intatto.
+                    pass
+
+            zout.writestr(item, data)
 
 def make7(d,out):
     repl={

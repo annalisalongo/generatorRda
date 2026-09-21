@@ -1,4 +1,4 @@
-# Generatore RDA Olivetti v0.4
+# Generatore RDA Olivetti v0.4.1
 
 Avvio:
 ```bash
@@ -20,4 +20,8 @@ streamlit run app.py
 - Allegato 3A: precompila solo i campi sicuri e lascia da verificare i campi autorizzativi/contrattuali.
 - Allegati 4/10/11/12/13/14/15/16: inclusi come template originali quando la condizione li richiede.
 
-La v0.4 è volutamente conservativa: se un dato non è disponibile, non lo inventa.
+La v0.4.1 è volutamente conservativa: se un dato non è disponibile, non lo inventa.
+
+
+## Fix v0.4.1
+Corretto il motore di sostituzione DOCX: non modifica più l’XML come testo grezzo. Le sostituzioni avvengono sui nodi `w:t` tramite `lxml`, così caratteri come &, <, >, apostrofi e accenti non corrompono il file Word. Test di apertura/render eseguito sull’Allegato 7.
