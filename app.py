@@ -1,5 +1,5 @@
 from pathlib import Path
-import io, re, shutil, tempfile, zipfile
+import io, re, shutil, tempfile, zipfile, subprocess, platform
 from datetime import datetime
 import streamlit as st
 from docx import Document
@@ -502,6 +502,39 @@ def attachment_filename(rda, code, ext):
     title = re.sub(r'[\\/:*?"<>|]+', '-', title).strip()
     return f"RDA {rda} {title}.{ext}"
 
+def _to_pdf(src: Path, out_dir: Path):
+    """Converte DOCX/XLSX in PDF. Prima prova LibreOffice; su macOS prova anche Microsoft Word."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    expected = out_dir / f"{src.stem}.pdf"
+
+    office = shutil.which('libreoffice') or shutil.which('soffice')
+    if office:
+        try:
+            subprocess.run(
+                [office, '--headless', '--convert-to', 'pdf', '--outdir', str(out_dir), str(src)],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90
+            )
+            if expected.exists():
+                return expected
+        except Exception:
+            pass
+
+    # Fallback per Mac con Microsoft Word installato (solo DOCX).
+    if platform.system() == 'Darwin' and src.suffix.lower() == '.docx' and shutil.which('osascript'):
+        script = f'''tell application "Microsoft Word"
+set d to open POSIX file "{str(src).replace('\\','\\\\').replace('\"','\\\"')}"
+save as d file name (POSIX file "{str(expected).replace('\\','\\\\').replace('\"','\\\"')}") file format format PDF
+close d saving no
+end tell'''
+        try:
+            subprocess.run(['osascript', '-e', script], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+            if expected.exists():
+                return expected
+        except Exception:
+            pass
+    return None
+
+
 def package(d,docs,offer_bytes=None,offer_name=None):
     td=Path(tempfile.mkdtemp()); produced=[]
     rda=str(d.get('rda','')).strip() or 'SENZA_NUMERO'
@@ -526,15 +559,39 @@ def package(d,docs,offer_bytes=None,offer_name=None):
             p=td/(offer_name or 'Offerta.pdf'); p.write_bytes(offer_bytes); produced.append(p)
         else:
             p=td/'OFFERTA_MANCANTE.txt'; p.write_text('Offerta non caricata.',encoding='utf-8'); produced.append(p)
+    # Per ogni allegato generato/coperto in DOCX/XLSX aggiunge anche la versione PDF.
+    # L'offerta, se caricata, è già PDF e non viene duplicata.
+    pdf_dir = td/'_pdf'
+    pdfs=[]
+    conversion_failed=[]
+    for p in list(produced):
+        if p.suffix.lower() in {'.docx', '.xlsx'}:
+            pdf = _to_pdf(p, pdf_dir)
+            if pdf and pdf.exists():
+                final_pdf = td/f"{p.stem}.pdf"
+                shutil.copy2(pdf, final_pdf)
+                pdfs.append(final_pdf)
+            else:
+                conversion_failed.append(p.name)
+    produced.extend(pdfs)
+    if conversion_failed:
+        note=td/'AVVISO_CONVERSIONE_PDF.txt'
+        note.write_text(
+            'Non è stato possibile creare il PDF per:\n- ' + '\n- '.join(conversion_failed) +
+            '\n\nInstalla LibreOffice sul computer che esegue l’app oppure, su macOS, verifica che Microsoft Word sia installato e autorizzato all’automazione.',
+            encoding='utf-8'
+        )
+        produced.append(note)
+
     z=io.BytesIO()
     with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED) as zz:
         for p in produced: zz.write(p,p.name)
     return z.getvalue()
 
 
-st.set_page_config(page_title='Generatore RDA Olivetti v0.5.4',layout='wide')
-st.title('Generatore RDA Olivetti — v0.5.4')
-st.caption('Carica Offerta + Richiesta RDA e incolla una riga copiata dalla Bibbia Excel. L’app estrae i dati e legge anche gli allegati da generare.')
+st.set_page_config(page_title='Generatore RDA Olivetti v0.5.8',layout='wide')
+st.title('Generatore RDA Olivetti — v0.5.8')
+st.caption('Carica Offerta + Richiesta RDA e incolla una riga copiata dalla Bibbia Excel. Lo ZIP finale contiene gli allegati sia nel formato originale sia in PDF.')
 
 st.subheader('1. Documenti e riga della Bibbia Excel')
 a,b=st.columns(2)
