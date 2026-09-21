@@ -627,4 +627,4 @@ if offer_file or rda_file or excel_paste.strip():
         z=package(d,docs,offer_file.getvalue() if offer_file else None,offer_file.name if offer_file else None)
         st.download_button('Scarica ZIP RDA',z,file_name=f"RDA_{rda}_allegati.zip",mime='application/zip')
 else:
-    st.info('Carica almeno un documento oppure incolla una riga Excel. Flusso consigliato: Offerta + Richiesta RDA + riga copiata dal'excell.')
+    st.info('Carica almeno un documento oppure incolla una riga Excel. Flusso consigliato: Offerta + Richiesta RDA + riga copiata dalla Bibbia.')
