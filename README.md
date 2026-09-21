@@ -1,27 +1,25 @@
-# Generatore RDA Olivetti v0.4.1
+# Generatore RDA Olivetti v0.5
 
-Avvio:
+## Novità
+La v0.5 parte dai documenti reali:
+1. carica l'**Offerta PDF**;
+2. carica la **Richiesta RDA PDF**;
+3. opzionalmente carica il **file Excel** e indica la riga;
+4. l'app estrae i dati e li mostra per controllo/correzione;
+5. scegli **Li indico io** per indicare direttamente gli allegati oppure **Determina automaticamente**;
+6. genera il pacchetto ZIP.
+
+L'app non inventa i campi che non trova: li lascia vuoti e richiede verifica manuale.
+
+## Installazione
 ```bash
 pip install -r requirements.txt
+```
+
+## Avvio
+```bash
 streamlit run app.py
 ```
 
-## Cosa cambia rispetto alla v0.3
-- usa i DOCX originali caricati, non overlay PDF a coordinate;
-- separa Trattativa Diretta da Acquisto Speciale;
-- non applica più la regola semplicistica `>20k = 3A` senza verificare le esclusioni;
-- Allegato 7 non viene proposto per nuova tranche senza variazione del valore complessivo o ingaggio precontrattuale;
-- gestisce condizioni per ATCS privato/PA, SaaS, AdS, data breach e gara prestazioni professionali;
-- consente di allegare la vera offerta del fornitore.
-
-## Stato compilazione
-- Allegato 6: precompila RDA, riferimenti e fornitore sul DOCX originale.
-- Allegato 7: precompila i campi del modello-esempio fornito (data, funzione, fornitore, oggetto, motivazione, importo).
-- Allegato 3A: precompila solo i campi sicuri e lascia da verificare i campi autorizzativi/contrattuali.
-- Allegati 4/10/11/12/13/14/15/16: inclusi come template originali quando la condizione li richiede.
-
-La v0.4.1 è volutamente conservativa: se un dato non è disponibile, non lo inventa.
-
-
-## Fix v0.4.1
-Corretto il motore di sostituzione DOCX: non modifica più l’XML come testo grezzo. Le sostituzioni avvengono sui nodi `w:t` tramite `lxml`, così caratteri come &, <, >, apostrofi e accenti non corrompono il file Word. Test di apertura/render eseguito sull’Allegato 7.
+## Nota
+Il parser è euristico: funziona sui modelli RDA/offerta simili agli esempi usati nello sviluppo, ma i dati estratti vanno sempre controllati nella schermata di revisione prima della generazione.
